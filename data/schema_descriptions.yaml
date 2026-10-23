@@ -1,0 +1,205 @@
+# Business descriptions of the Northwind schema (database `northwind`, schema `public`).
+# Used by the text-to-SQL agent: each table becomes a document in the Chroma `schema_docs` collection.
+# domain: sales | customers | products | hr | logistics
+# pii: true marks personal-data columns (queries touching them need human approval).
+# Note: all order dates were shifted forward 28 years (orders span 2024-07-04 to 2026-05-06).
+
+tables:
+  # ---------------------------------------------------------------- sales
+  orders:
+    domain: sales
+    description: >
+      One row per customer order (830 rows, order dates 2024-07-04 to 2026-05-06).
+      Joins to customers on customer_id, to employees on employee_id (the salesperson),
+      to shippers on ship_via, and to order_details on order_id (the products on the order).
+      An order with shipped_date NULL has not shipped yet (21 orders).
+    columns:
+      order_id:         {description: "Primary key of the order. Joins to order_details.order_id"}
+      customer_id:      {description: "FK to customers.customer_id (5-letter text code, e.g. 'VINET')"}
+      employee_id:      {description: "FK to employees.employee_id, the salesperson who took the order"}
+      order_date:       {description: "Date the order was placed. Use this for sales-over-time questions"}
+      required_date:    {description: "Date the customer wanted the order delivered by"}
+      shipped_date:     {description: "Date the order was shipped. NULL if not shipped yet. Late if later than required_date"}
+      ship_via:         {description: "FK to shippers.shipper_id, the carrier that delivered the order (only 1, 2 or 3 are used)"}
+      freight:          {description: "Shipping cost of the order, in currency units"}
+      ship_name:        {description: "Name of the recipient on the shipping label", pii: true}
+      ship_address:     {description: "Street address the order was shipped to", pii: true}
+      ship_city:        {description: "City the order was shipped to"}
+      ship_region:      {description: "State or region the order was shipped to. Mostly NULL (507 of 830 orders)"}
+      ship_postal_code: {description: "Postal code the order was shipped to"}
+      ship_country:     {description: "Country the order was shipped to, e.g. 'Germany'. Use this for sales-by-country questions"}
+
+  order_details:
+    domain: sales
+    description: >
+      One row per product line on an order (2155 rows). The primary key is (order_id, product_id).
+      Line revenue = unit_price * quantity * (1 - discount). Total order revenue is the SUM of
+      line revenue grouped by order_id. Joins to orders on order_id and to products on product_id.
+    columns:
+      order_id:   {description: "FK to orders.order_id"}
+      product_id: {description: "FK to products.product_id"}
+      unit_price: {description: "Price per unit actually charged on this order line. May differ from products.unit_price"}
+      quantity:   {description: "Number of units ordered on this line"}
+      discount:   {description: "Discount as a fraction between 0 and 1 (0.05 means 5 percent), not a percentage. 0 means no discount"}
+
+  # ------------------------------------------------------------ customers
+  customers:
+    domain: customers
+    description: >
+      Companies that buy from us (91 rows, 21 countries). customer_id is a 5-letter text code
+      such as 'VINET', not a number. Joins to orders on customer_id.
+    columns:
+      customer_id:   {description: "5-letter text primary key, e.g. 'VINET'"}
+      company_name:  {description: "Name of the customer company"}
+      contact_name:  {description: "Name of the contact person at the customer", pii: true}
+      contact_title: {description: "Job title of the contact person", pii: true}
+      address:       {description: "Street address of the customer", pii: true}
+      city:          {description: "City of the customer"}
+      region:        {description: "State or region of the customer. Mostly NULL (60 of 91 customers)"}
+      postal_code:   {description: "Postal code of the customer"}
+      country:       {description: "Country of the customer, e.g. 'Germany'. Use this for customers-by-country questions"}
+      phone:         {description: "Phone number of the customer", pii: true}
+      fax:           {description: "Fax number of the customer", pii: true}
+
+  customer_demographics:
+    domain: customers
+    description: >
+      EMPTY and unused (0 rows). Lookup of customer type descriptions. Do not use it to answer questions.
+    columns:
+      customer_type_id: {description: "Primary key of the customer type"}
+      customer_desc:    {description: "Description of the customer type"}
+
+  customer_customer_demo:
+    domain: customers
+    description: >
+      EMPTY and unused (0 rows). Link table between customers and customer_demographics. Do not use it
+      to answer questions.
+    columns:
+      customer_id:      {description: "FK to customers.customer_id"}
+      customer_type_id: {description: "FK to customer_demographics.customer_type_id"}
+
+  # ------------------------------------------------------------- products
+  products:
+    domain: products
+    description: >
+      Products we sell (77 rows, 10 of them discontinued). Joins to categories on category_id,
+      to suppliers on supplier_id, and to order_details on product_id.
+    columns:
+      product_id:        {description: "Primary key of the product"}
+      product_name:      {description: "Name of the product"}
+      supplier_id:       {description: "FK to suppliers.supplier_id"}
+      category_id:       {description: "FK to categories.category_id"}
+      quantity_per_unit: {description: "Packaging description as text, e.g. '10 boxes x 20 bags'"}
+      unit_price:        {description: "Current list price per unit. Actual sale prices are in order_details.unit_price"}
+      units_in_stock:    {description: "Units currently in stock. 0 means out of stock"}
+      units_on_order:    {description: "Units on order from the supplier but not yet received"}
+      reorder_level:     {description: "Stock level at which the product should be reordered"}
+      discontinued:      {description: "Integer flag, not a boolean: 1 means discontinued, 0 means still sold"}
+
+  categories:
+    domain: products
+    description: >
+      Product categories (8 rows): Beverages, Condiments, Confections, Dairy Products, Grains/Cereals,
+      Meat/Poultry, Produce, Seafood. Joins to products on category_id.
+    columns:
+      category_id:   {description: "Primary key of the category"}
+      category_name: {description: "Name of the category, e.g. 'Beverages'"}
+      description:   {description: "Short text description of the category"}
+      picture:       {description: "Binary image data, not useful for queries. Never select it"}
+
+  suppliers:
+    domain: products
+    description: >
+      Companies that supply our products (29 rows). Joins to products on supplier_id.
+    columns:
+      supplier_id:   {description: "Primary key of the supplier"}
+      company_name:  {description: "Name of the supplier company"}
+      contact_name:  {description: "Name of the contact person at the supplier", pii: true}
+      contact_title: {description: "Job title of the contact person", pii: true}
+      address:       {description: "Street address of the supplier", pii: true}
+      city:          {description: "City of the supplier"}
+      region:        {description: "State or region of the supplier. Often NULL"}
+      postal_code:   {description: "Postal code of the supplier"}
+      country:       {description: "Country of the supplier"}
+      phone:         {description: "Phone number of the supplier", pii: true}
+      fax:           {description: "Fax number of the supplier. Often NULL", pii: true}
+      homepage:      {description: "Supplier website. Mostly NULL (24 of 29 suppliers)"}
+
+  # ------------------------------------------------------------------- hr
+  employees:
+    domain: hr
+    description: >
+      Our staff (9 rows), all in sales: titles are Sales Representative, Sales Manager,
+      Inside Sales Coordinator and Vice President, Sales. Joins to orders on employee_id.
+      reports_to points to another employee, so the manager hierarchy needs a self-join;
+      it is NULL for the top person.
+    columns:
+      employee_id:       {description: "Primary key of the employee. Joins to orders.employee_id"}
+      last_name:         {description: "Employee last name", pii: true}
+      first_name:        {description: "Employee first name", pii: true}
+      title:             {description: "Job title, e.g. 'Sales Representative'"}
+      title_of_courtesy: {description: "Courtesy title such as Mr., Ms. or Dr."}
+      birth_date:        {description: "Date of birth", pii: true}
+      hire_date:         {description: "Date the employee was hired. These dates were not shifted"}
+      address:           {description: "Home street address", pii: true}
+      city:              {description: "Home city"}
+      region:            {description: "Home state or region"}
+      postal_code:       {description: "Home postal code"}
+      country:           {description: "Home country"}
+      home_phone:        {description: "Home phone number", pii: true}
+      extension:         {description: "Office phone extension"}
+      photo:             {description: "Binary image data, not useful for queries. Never select it"}
+      notes:             {description: "Free-text biography and background notes", pii: true}
+      reports_to:        {description: "FK to employees.employee_id, the employee's manager. NULL for the top person"}
+      photo_path:        {description: "Link to the photo file, not useful for queries"}
+
+  employee_territories:
+    domain: hr
+    description: >
+      Link table (49 rows) saying which employee covers which sales territory. Joins employees
+      to territories.
+    columns:
+      employee_id:  {description: "FK to employees.employee_id"}
+      territory_id: {description: "FK to territories.territory_id (a text code)"}
+
+  territories:
+    domain: hr
+    description: >
+      Sales territories (53 rows). Each territory belongs to one region (4 regions in total).
+      Joins to region on region_id and to employee_territories on territory_id.
+    columns:
+      territory_id:          {description: "Primary key, a text code such as '01581'"}
+      territory_description: {description: "Name of the territory, usually a city, e.g. 'Westboro'"}
+      region_id:             {description: "FK to region.region_id"}
+
+  region:
+    domain: hr
+    description: >
+      The four sales regions (4 rows): 1 Eastern, 2 Western, 3 Northern, 4 Southern.
+      Joins to territories on region_id.
+    columns:
+      region_id:          {description: "Primary key of the region"}
+      region_description: {description: "Name of the region: Eastern, Western, Northern or Southern"}
+
+  # ------------------------------------------------------------ logistics
+  shippers:
+    domain: logistics
+    description: >
+      Shipping companies (6 rows): Speedy Express, United Package, Federal Shipping,
+      Alliance Shippers, UPS, DHL. Joins to orders on shipper_id = orders.ship_via.
+      Only shippers 1, 2 and 3 have any orders.
+    columns:
+      shipper_id:   {description: "Primary key. Joins to orders.ship_via"}
+      company_name: {description: "Name of the shipping company"}
+      phone:        {description: "Phone number of the shipping company", pii: true}
+
+  us_states:
+    domain: logistics
+    description: >
+      Lookup of the 51 US states and their abbreviations. Not linked to any other table by a
+      foreign key. Rarely needed.
+    columns:
+      state_id:     {description: "Primary key of the state"}
+      state_name:   {description: "Full state name, e.g. 'Alabama'"}
+      state_abbr:   {description: "Two-letter abbreviation, e.g. 'AL'"}
+      state_region: {description: "Broad US region as lowercase text, e.g. 'south' or 'north'"}

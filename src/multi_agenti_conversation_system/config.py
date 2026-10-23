@@ -1,4 +1,3 @@
-from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,8 +18,10 @@ class Settings(BaseSettings):
     CHAT_MODEL: str
     EMBED_MODEL: str
     TEMPERATURE: float
-    MODEL_REASONING : bool
-    OPENROUTER_API_KEY : str
+    MODEL_REASONING: bool
+    OPENROUTER_API_KEY: str
+    CHROMADB_HOST: str
+    CHROMADB_PORT: int
 
 
 settings = Settings()

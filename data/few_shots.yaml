@@ -1,0 +1,217 @@
+# Seed question -> SQL examples for the text-to-SQL agent (Chroma collection `sql_seed_examples`).
+# Rules: one SELECT per example, PostgreSQL syntax, no trailing semicolon, tagged with a domain.
+# Reminder: order dates span 2024-07-04 to 2026-05-06, so "last year" means 2025.
+# Revenue of an order line = unit_price * quantity * (1 - discount).
+# Product ids run 1..77. Examples marked "pii" touch personal-data columns and should trigger approval.
+
+examples:
+  # ---------------------------------------------------------------- customers
+  - question: "How many customers do we have in each country?"
+    domain: customers
+    sql: |
+      SELECT country, COUNT(*) AS customer_count
+      FROM customers
+      GROUP BY country
+      ORDER BY customer_count DESC
+
+  - question: "Which customers have placed more than 10 orders?"
+    domain: customers
+    sql: |
+      SELECT c.customer_id, c.company_name, COUNT(o.order_id) AS order_count
+      FROM customers c
+      JOIN orders o ON o.customer_id = c.customer_id
+      GROUP BY c.customer_id, c.company_name
+      HAVING COUNT(o.order_id) > 10
+      ORDER BY order_count DESC
+
+  - question: "Which customers spent more than the average customer?"
+    domain: customers
+    sql: |
+      WITH customer_revenue AS (
+        SELECT o.customer_id,
+               SUM(od.unit_price * od.quantity * (1 - od.discount)) AS revenue
+        FROM orders o
+        JOIN order_details od ON od.order_id = o.order_id
+        GROUP BY o.customer_id
+      )
+      SELECT c.company_name, ROUND(cr.revenue::numeric, 2) AS revenue
+      FROM customer_revenue cr
+      JOIN customers c ON c.customer_id = cr.customer_id
+      WHERE cr.revenue > (SELECT AVG(revenue) FROM customer_revenue)
+      ORDER BY cr.revenue DESC
+
+  - question: "Give me the contact names and phone numbers of our customers in Germany"
+    domain: customers
+    pii: true
+    sql: |
+      SELECT company_name, contact_name, contact_title, phone
+      FROM customers
+      WHERE country = 'Germany'
+      ORDER BY company_name
+
+  # -------------------------------------------------------------------- sales
+  - question: "How many orders were placed in March 2025?"
+    domain: sales
+    sql: |
+      SELECT COUNT(*) AS order_count
+      FROM orders
+      WHERE order_date >= DATE '2025-03-01'
+        AND order_date < DATE '2025-04-01'
+
+  - question: "What was our total revenue by month in 2025?"
+    domain: sales
+    sql: |
+      SELECT DATE_TRUNC('month', o.order_date)::date AS month,
+             ROUND(SUM(od.unit_price * od.quantity * (1 - od.discount))::numeric, 2) AS revenue
+      FROM orders o
+      JOIN order_details od ON od.order_id = o.order_id
+      WHERE o.order_date >= DATE '2025-01-01'
+        AND o.order_date < DATE '2026-01-01'
+      GROUP BY month
+      ORDER BY month
+
+  - question: "Who are our top 5 customers by total revenue?"
+    domain: sales
+    sql: |
+      SELECT c.company_name,
+             ROUND(SUM(od.unit_price * od.quantity * (1 - od.discount))::numeric, 2) AS revenue
+      FROM customers c
+      JOIN orders o ON o.customer_id = c.customer_id
+      JOIN order_details od ON od.order_id = o.order_id
+      GROUP BY c.company_name
+      ORDER BY revenue DESC
+      LIMIT 5
+
+  - question: "What is the total revenue for each product category?"
+    domain: sales
+    sql: |
+      SELECT cat.category_name,
+             ROUND(SUM(od.unit_price * od.quantity * (1 - od.discount))::numeric, 2) AS revenue
+      FROM order_details od
+      JOIN products p ON p.product_id = od.product_id
+      JOIN categories cat ON cat.category_id = p.category_id
+      GROUP BY cat.category_name
+      ORDER BY revenue DESC
+
+  - question: "What were the top 10 countries by sales revenue in 2025?"
+    domain: sales
+    sql: |
+      SELECT o.ship_country,
+             ROUND(SUM(od.unit_price * od.quantity * (1 - od.discount))::numeric, 2) AS revenue
+      FROM orders o
+      JOIN order_details od ON od.order_id = o.order_id
+      WHERE o.order_date >= DATE '2025-01-01'
+        AND o.order_date < DATE '2026-01-01'
+      GROUP BY o.ship_country
+      ORDER BY revenue DESC
+      LIMIT 10
+
+  - question: "Which orders have not been shipped yet?"
+    domain: sales
+    sql: |
+      SELECT order_id, customer_id, order_date, required_date
+      FROM orders
+      WHERE shipped_date IS NULL
+      ORDER BY order_date
+
+  # ----------------------------------------------------------------- products
+  - question: "Which products cost less than 20 and are still being sold?"
+    domain: products
+    sql: |
+      SELECT product_id, product_name, unit_price
+      FROM products
+      WHERE unit_price < 20
+        AND discontinued = 0
+      ORDER BY unit_price
+
+  - question: "Which products are currently out of stock?"
+    domain: products
+    sql: |
+      SELECT product_id, product_name, units_on_order
+      FROM products
+      WHERE units_in_stock = 0
+      ORDER BY product_name
+
+  - question: "Show me the details of the product with product_id 38"
+    domain: products
+    sql: |
+      SELECT p.product_id, p.product_name, cat.category_name, s.company_name AS supplier,
+             p.quantity_per_unit, p.unit_price, p.units_in_stock, p.discontinued
+      FROM products p
+      JOIN categories cat ON cat.category_id = p.category_id
+      JOIN suppliers s ON s.supplier_id = p.supplier_id
+      WHERE p.product_id = 38
+
+  - question: "Which supplier provides the most products?"
+    domain: products
+    sql: |
+      SELECT s.company_name, COUNT(p.product_id) AS product_count
+      FROM suppliers s
+      JOIN products p ON p.supplier_id = s.supplier_id
+      GROUP BY s.company_name
+      ORDER BY product_count DESC
+      LIMIT 1
+
+  - question: "Which products are priced above the average price of their category?"
+    domain: products
+    sql: |
+      SELECT p.product_name, cat.category_name, p.unit_price
+      FROM products p
+      JOIN categories cat ON cat.category_id = p.category_id
+      WHERE p.unit_price > (
+        SELECT AVG(p2.unit_price)
+        FROM products p2
+        WHERE p2.category_id = p.category_id
+      )
+      ORDER BY cat.category_name, p.unit_price DESC
+
+  # ----------------------------------------------------------------------- hr
+  - question: "Which employee has handled the most orders?"
+    domain: hr
+    pii: true
+    sql: |
+      SELECT e.first_name, e.last_name, COUNT(o.order_id) AS order_count
+      FROM employees e
+      JOIN orders o ON o.employee_id = e.employee_id
+      GROUP BY e.employee_id, e.first_name, e.last_name
+      ORDER BY order_count DESC
+      LIMIT 1
+
+  - question: "List each employee together with their manager"
+    domain: hr
+    pii: true
+    sql: |
+      SELECT e.first_name || ' ' || e.last_name AS employee,
+             m.first_name || ' ' || m.last_name AS manager
+      FROM employees e
+      LEFT JOIN employees m ON m.employee_id = e.reports_to
+      ORDER BY employee
+
+  - question: "How many territories does each sales region have?"
+    domain: hr
+    sql: |
+      SELECT r.region_description, COUNT(t.territory_id) AS territory_count
+      FROM region r
+      JOIN territories t ON t.region_id = r.region_id
+      GROUP BY r.region_description
+      ORDER BY territory_count DESC
+
+  # ---------------------------------------------------------------- logistics
+  - question: "What is the average freight cost for each shipping company?"
+    domain: logistics
+    sql: |
+      SELECT sh.company_name, ROUND(AVG(o.freight)::numeric, 2) AS avg_freight
+      FROM orders o
+      JOIN shippers sh ON sh.shipper_id = o.ship_via
+      GROUP BY sh.company_name
+      ORDER BY avg_freight DESC
+
+  - question: "How many orders were shipped late, by shipping company?"
+    domain: logistics
+    sql: |
+      SELECT sh.company_name, COUNT(*) AS late_orders
+      FROM orders o
+      JOIN shippers sh ON sh.shipper_id = o.ship_via
+      WHERE o.shipped_date > o.required_date
+      GROUP BY sh.company_name
+      ORDER BY late_orders DESC

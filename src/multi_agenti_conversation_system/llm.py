@@ -1,6 +1,7 @@
-from langchain_openrouter import ChatOpenRouter
 from langchain_ollama import OllamaEmbeddings
-from .config import settings
+from langchain_openrouter import ChatOpenRouter
+
+from multi_agenti_conversation_system.config import settings
 
 
 def get_chat_model():
@@ -8,7 +9,7 @@ def get_chat_model():
         api_key=settings.OPENROUTER_API_KEY,
         model=settings.CHAT_MODEL,
         temperature=settings.TEMPERATURE,
-        max_retries=4
+        max_retries=4,
     )
 
     return llm
