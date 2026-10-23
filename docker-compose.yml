@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:14.24
+    container_name: agent-postgres
+    restart : unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be set}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data      # NOT .../postgresql/data (see note below)
+      - ./db:/db:ro                      # so psql inside the container can read our SQL files
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  
+  chroma:
+    image: chromadb/chroma:1.0.21
+    container_name: agent-chroma
+    restart : unless-stopped
+    ports: ["5430:8000"]
+    volumes:
+      - chromedata:/data
+
+volumes:
+  pgdata:
+  chromedata:
+
+  

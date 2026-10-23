@@ -1,0 +1,35 @@
+[project]
+name = "multi-agenti-conversation-system"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Swatantra Jain" }
+]
+requires-python = ">=3.14.0"
+dependencies = [
+    "chromadb>=1.0,<1.1",
+    "langchain-chroma>=1.0.0",
+    "langchain-ollama>=1.1.0",
+    "langchain-openrouter>=0.2.9",
+    "langchain[mcp]>=1.4.6",
+    "langgraph>=1.2.15",
+    "psycopg[binary]>=3.3.6",
+    "pydantic-settings>=2.16.0",
+    "python-dotenv>=1.2.4",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+multi-agenti-conversation-system = "multi_agenti_conversation_system:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.0",
+]
