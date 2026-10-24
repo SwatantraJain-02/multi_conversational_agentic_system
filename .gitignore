@@ -221,3 +221,9 @@ __marimo__/
 
 # evals
 /evals/results/
+
+# VS Code MCP config (contains the bearer token; copy .mcp.json.example)
+.mcp.json
+
+# eval results (the folder is eval/, not evals/)
+/eval/results/

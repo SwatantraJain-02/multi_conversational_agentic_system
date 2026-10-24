@@ -1,0 +1,11 @@
+{
+	"mcpServers": {
+		"northwind-db": {
+			"url": "http://127.0.0.1:5555/mcp",
+			"type": "http",
+			"headers": {
+				"Authorization": "Bearer <your DB_MCP_TOKEN from .env>"
+			}
+		}
+	}
+}
