@@ -83,7 +83,8 @@ Dependencies point one way, and `import-linter` fails the build if they don't
 ## Observability
 
 - Every tool call logs one line: `tool_call tool=… ok=… duration_ms=… row_count=… trace_id=…`.
-  Row values are never logged, and SQL text only at `LOG_LEVEL=DEBUG`.
+  Row values and SQL text are never logged at INFO; error messages (which can echo SQL) are
+  logged only at `LOG_LEVEL=DEBUG`.
 - Tracing is off until an exporter is set. To see traces locally:
 
   ```bash

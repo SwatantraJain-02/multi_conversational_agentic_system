@@ -21,7 +21,7 @@ The capstone ([docs/Capstone Problem Statement](../docs/)) asks for one chatbot 
 
 | Area | Choice | Notes |
 |---|---|---|
-| LLM | **Ollama (local)**, `qwen3:8b` (or `qwen3:14b` with ≥32 GB RAM) | You pick the final model in Phase 0 after a tool-calling smoke test. `llama3.1:8b` is the fallback. |
+| LLM | **OpenRouter** chat model (`CHAT_MODEL`), switchable to **Ollama** with `CHAT_PROVIDER=ollama` | *As built.* The original plan was a local `qwen3`; Phase 0 ended on OpenRouter. `scripts/smoke_llm.py` is the tool-calling / structured-output check to re-run for any new model. Embeddings stay on Ollama. |
 | Embeddings | **Ollama** `nomic-embed-text` | Use one embedding model everywhere. Re-calibrate the 0.92 cache threshold for it (Phase 10). |
 | Business DB | **Your existing Postgres container**, loaded with **Northwind** (`pthom/northwind_psql`) | Its sales schema suits "internal sales vs market trend" hybrid questions. |
 | Vector DB | **Your existing Chroma container** (`localhost:5430`) | It holds **all** embeddings. Your Postgres image has no pgvector, and Chroma is already running. |
@@ -37,10 +37,10 @@ The capstone ([docs/Capstone Problem Statement](../docs/)) asks for one chatbot 
 
 | Area | Default | Why |
 |---|---|---|
-| Python / packaging | Python 3.12, **uv**, `pyproject.toml`, `src/` layout | Fast, gives you a lockfile, current standard |
+| Python / packaging | Python 3.14 (as built, see `.python-version`), **uv**, `pyproject.toml`, `src/` layout | Fast, gives you a lockfile, current standard |
 | MCP server SDK | `mcp` (official, 2.3.x) | Decorator-based tools, with input schemas taken from type hints |
 | MCP client | `langchain[mcp]` → `from langchain.mcp import MCPAdapter` | The old `langchain-mcp-adapters` is **archived**. The new namespace is **beta**, so pin its version. |
-| MCP transports | **DB server: stdio**, **Web server: Streamable HTTP** | You show both transports, and a long-lived web server keeps its rate-limiter state (G3) |
+| MCP transports | **Both servers: Streamable HTTP** | *As built.* The DB server was built as HTTP instead of stdio (Phase 2). A long-lived process owns the connection pool and the Chroma/Ollama clients, can be probed (`/ready`) and traced on its own, and the web server keeps its rate-limiter state (G3). |
 | Checkpointer | `AsyncPostgresSaver` (`langgraph-checkpoint-postgres`) | Conversation state survives restarts |
 | User profile store | LangGraph `AsyncPostgresStore` **without** a vector index | A plain key-value store namespaced by `user_id`, so it needs no pgvector |
 | Vector client | `chromadb.HttpClient` + `langchain-chroma`, embeddings computed by `OllamaEmbeddings` | Keeps one embedding model and skips Chroma's built-in default model |
@@ -95,7 +95,7 @@ User (Streamlit) ── user_id + thread_id ──► LangGraph app   (checkpoin
  web_agent:  search → fetch → chunk → rerank → compress → summarise (with URLs)
 
  MCP:     web_server (Streamable HTTP: search_web, fetch_page)
-          db_server  (stdio: list_tables, get_schema, search_schema, get_few_shots, explain_query, run_select_query)
+          db_server  (Streamable HTTP: list_tables, get_schema, search_schema, get_few_shots, explain_query, run_select_query)
  Storage: Postgres[northwind] (read-only role) · Postgres[agent_memory] (checkpoints + profile KV)
           Chroma (schema_docs, sql_seed_examples, user_facts, episodes, semantic_cache)
 ```
@@ -112,13 +112,19 @@ multi_conversational_agentic_system/
 ├── prompts/                        # supervisor/planner_v1.yaml, sql/v1.yaml, web/v1.yaml, memory/v1.yaml ...
 ├── data/                           # schema_descriptions.yaml, few_shots.yaml
 ├── scripts/                        # smoke_ollama.py, build_schema_index.py, smoke_mcp.py, calibrate_cache.py
-├── src/agentic_chatbot/
-│   ├── config.py, llm.py, prompts.py
+├── src/multi_agenti_conversation_system/
+│   ├── config.py                   # per-concern settings classes + cached get_*() getters, nothing read at import
+│   ├── catalog.py                  # SchemaCatalog: schema docs, PII flags, few-shots (pure; shared by agent and server)
+│   ├── llm.py, prompts.py          # build_chat_model / build_embeddings (provider switch, retries, task prefixes)
+│   ├── observability.py            # logging, OpenTelemetry setup, span() helper
 │   ├── guardrails/                 # sql_validator.py (shared by agent AND server), input_guard.py
-│   ├── mcp_servers/
-│   │   ├── db_server/              # server.py, db.py, schema_index.py
-│   │   └── web_server/             # server.py, tavily_client.py, fetch.py, rate_limit.py
-│   ├── mcp_client.py               # MCPAdapter config + tool discovery → registry per server
+│   ├── mcp/
+│   │   ├── contracts/              # typed tool responses shared by servers and agents: db.py, web.py (pure, pydantic only)
+│   │   ├── client.py               # MCPAdapter config + tool discovery → registry per server (Phase 4)
+│   │   └── servers/
+│   │       ├── http_auth.py        # BearerAuth + is_loopback, shared by every server
+│   │       ├── db_server/          # server.py (transport) → service.py (logic) → db.py, schema_index.py (adapters)
+│   │       └── web_server/         # same shape: server.py, service.py, tavily_client.py, fetch.py, rate_limit.py
 │   ├── vectorstore.py              # Chroma HttpClient + collection factory (cosine space)
 │   ├── memory/                     # profile.py, facts.py, episodes.py, cache.py, history.py
 │   ├── graph/
@@ -132,6 +138,33 @@ multi_conversational_agentic_system/
 └── tests/                          # unit/, integration/
 ```
 
+## Architecture rules (apply from Phase 3 on)
+
+The Phase 0–2 code was refactored to these rules, and `import-linter` (`[tool.importlinter]` in `pyproject.toml`, run in CI) enforces the ones marked **[enforced]**. Each phase adds its own contracts when it creates its package: a contract that names a missing module fails with "module not found".
+
+**Dependency rules**
+1. **Pure core** **[enforced]**: `catalog`, `guardrails` and `mcp/contracts` import no settings, adapters or infrastructure (no `config`, `llm`, `vectorstore`, `psycopg`, `chromadb`, `httpx`, `langchain*`, `mcp` SDK). Both the agent and the servers use them, and tests need nothing running.
+2. **Settings are read only at composition roots**: each server's `main` / `build_service`, `graph/builder.py` for the agent app, and script `main()` functions. Everything else receives what it needs as arguments. **[enforced]** for `db.py`, `schema_index.py`, `service.py`, `http_auth.py` and `observability.py`, which must not import `config` at runtime (type-only imports are fine).
+3. **Agents reach tools only through MCP.** `graph`, `memory` and `ui` must not import `mcp.servers`; they parse tool results with the models in `mcp/contracts/`. Add this contract in Phase 5.
+4. **Servers are independent**: `db_server` and `web_server` must not import each other. Shared code goes in `mcp/servers/http_auth.py` or the pure core. Add this contract in Phase 3.
+5. **Layers:** `ui` → `graph` → (`memory`, `mcp.client`) → adapters (`llm`, `vectorstore`) → pure core. **[enforced]** inside `db_server`: `server` → `service` → (`db`, `schema_index`).
+
+**Conventions per area**
+- **Every MCP server** (the Phase 3 web server included) copies the DB server's shape:
+  - `server.py`: thin tool adapters and routes, no logic;
+  - `service.py`: all tool logic, with adapters passed in (Protocols such as `DbReader` / `SchemaSearch` where a test needs a fake);
+  - adapters for each outside service, each with `ping()` for readiness;
+  - `build_service()` and `create_app(service, token)` as the composition root;
+  - `/health` (liveness), `/ready` (every dependency, per-check booleans, 503 when down), bearer auth through `http_auth.py`;
+  - typed responses from `mcp/contracts/<server>.py`, each tool returning one model with `ok` / `error`.
+- **Graph nodes** take their dependencies from a context object built once in `graph/builder.py` (MCP tool registry, chat model, embeddings, Chroma client, stores). Nodes never call `get_*()` globals.
+- **Memory modules** (`facts`, `episodes`, `cache`) take the Chroma client and an `Embeddings` through their constructors, and each owns its collection name and metadata schema.
+- **Prompts** live in `prompts/<area>/vN.yaml` and are loaded through `prompts.py`. Graph code holds no inline prompt strings.
+- **Models:** build them with `build_chat_model(cfg)` and `build_embeddings(cfg)`. Embedding task prefixes and retry policy belong to the embedder, not to the code that stores or searches vectors.
+- **Resilience:** every outbound call has a timeout from settings. Retry only idempotent calls (embeddings), with backoff. Database queries are not retried; the error goes back to the agent.
+- **Observability:** one `tool_call` log line per tool call, and child spans through `observability.span()`. Spans and INFO logs carry counts and flags, never SQL text or row values.
+- **The UI** imports only `graph.builder` and runs one background event loop (G6).
+
 ---
 
 ## Phases
@@ -144,7 +177,7 @@ multi_conversational_agentic_system/
   - how Ollama serves models.
 - **Do:**
   1. `git init`, plus a `.gitignore` covering `.env`, `.venv/`, `__pycache__/` and `eval/results/`.
-  2. `uv init --package` with Python 3.12. Name the package `agentic_chatbot`, or a name you prefer.
+  2. `uv init --package` with Python 3.14. The package is named `multi_agenti_conversation_system`.
   3. Install Ollama, then `ollama pull qwen3:8b` and `ollama pull nomic-embed-text`.
   4. Add the core deps (`langgraph`, `langchain`, `"langchain[mcp]"`, `langchain-ollama`, `pydantic-settings`) and the dev deps (`pytest`, `pytest-asyncio`, `ruff`).
   5. `config.py` holds model names, DB URLs, the Chroma host/port, the Tavily key and the thresholds. `llm.py` holds the model factory functions.
@@ -163,12 +196,12 @@ multi_conversational_agentic_system/
 - **Chroma:** `chromadb/chroma` on host `:5430`, bind-mounted to `~/chroma-data`.
 - **Learn:**
   - named vs anonymous Docker volumes;
-  - why to pin `postgres:18` instead of `:latest`;
+  - why to pin a Postgres version instead of `:latest` (built with `postgres:14.24`);
   - Postgres roles and grants, `default_transaction_read_only` and `statement_timeout`;
   - Chroma's HTTP client and its distance metrics.
 - **Do:**
   1. **Recommended, and cheapest to do now while the DB is empty:** write a `docker-compose.yml` that reproduces both containers. Use these settings:
-     - Postgres: pin `postgres:18`, a **named volume**, and a healthcheck.
+     - Postgres: pin the version (built with `postgres:14.24`), a **named volume**, and a healthcheck.
      - Chroma: pin the image to the version you have now.
 
      Then swap your hand-started containers for the compose ones. This makes the project reproducible for whoever grades it. An anonymous volume gets orphaned if the container is ever recreated, and `:latest` can jump to a new major version that won't start on old data.
@@ -189,7 +222,7 @@ multi_conversational_agentic_system/
      - remember Chroma returns a *distance*: `similarity = 1 − distance`.
 - **Gate:** `psql` output proving `agent_readonly` can SELECT and that DELETE/DROP fail, the two YAML files, and a Chroma round-trip.
 
-### Phase 2 — DB MCP server (stdio)
+### Phase 2 — DB MCP server (Streamable HTTP, built as `db_server/`)
 - **Learn:**
   - MCP basics: server, client, tools, transports;
   - how type hints become a tool's input schema;
@@ -238,18 +271,18 @@ multi_conversational_agentic_system/
   - the `MCPAdapter` lifecycle: by default each tool call opens its own session;
   - holding the adapter context open reuses one connection.
 - **Do:**
-  1. `mcp_client.py`:
-     - builds an `mcpServers` config with `db` over stdio (`command`/`args`) and `web` as a URL;
+  1. `mcp/client.py`:
+     - builds an `mcpServers` config with `db` and `web` both as URLs (the DB server needs the `Authorization: Bearer <DB_MCP_TOKEN>` header);
      - discovers tools with `list_tools()`;
      - returns a registry grouped by server.
   2. `scripts/smoke_mcp.py` lists the tools and calls one from each server.
   3. Add a trivial new tool to a server and restart. It should be discovered **without changing any graph code**.
-  4. **Check the stdio child environment (G9):** does the DB server process actually see the DB URL, the Chroma host and the Ollama host?
-  5. **Time the per-call cost (G3):** time 5 consecutive DB calls, and add a call counter to the server to see whether every call spawns a new process. If they're slow, hold the adapter context open for the whole turn.
+  4. **Check auth and reachability:** a call without the token gets 401, and the DB server's `/ready` shows Postgres, Chroma and Ollama reachable from the server process.
+  5. **Time the per-call cost (G3):** time 5 consecutive DB calls. HTTP spawns no process, so what remains is MCP session setup per call. If it is slow, hold the adapter context open for the whole turn.
 - **Gate:**
   - the smoke-script output;
   - the timing numbers;
-  - your own explanation of why the web server is HTTP and the DB server is stdio.
+  - your own explanation of why both servers are long-lived HTTP processes rather than stdio children.
 
 ### Phase 5 — Graph state and skeleton
 - **Learn:**
@@ -400,7 +433,7 @@ multi_conversational_agentic_system/
   - the memory justification table;
   - the guardrails and HITL design;
   - the eval results;
-  - **limitations**: local-model quality, Northwind's small schema, Tavily's coverage, cache staleness, the cost of starting a stdio process;
+  - **limitations**: local-model quality, Northwind's small schema, Tavily's coverage, cache staleness, the per-call cost of MCP session setup;
   - README setup: `docker compose up`, `ollama pull`, `uv sync`, build the index, start the web server, `streamlit run`.
 - **Gate:** final review of the repo and the report.
 
@@ -470,21 +503,21 @@ multi_conversational_agentic_system/
 ## Gotchas (each is revisited in its phase)
 - **G1 Ollama structured output:** use `with_structured_output(..., method="json_schema")` and test it in Phase 0. Qwen3 has a "thinking" mode, so make sure `<think>` text never leaks into parsed output.
 - **G2 MCP client is beta:** `langchain.mcp` emits a beta warning, so pin its version. The fallback is the archived `langchain-mcp-adapters` (`MultiServerMCPClient`).
-- **G3 One session per tool call:** over stdio this likely means a new server process for each call, so in-memory state resets and every call pays startup time. Verify in Phase 4. HTTP avoids it for the web server.
+- **G3 One session per tool call:** the adapter opens a session per call by default. Both servers are long-lived HTTP processes, so in-memory state (pools, rate limiter, clients) survives; the remaining cost is session setup. Measure it in Phase 4.
 - **G4 HITL location:** `interrupt()` only works inside graph nodes, and needs a checkpointer plus a `thread_id`.
 - **G5 Guardrails in two places:** in the agent *and* at the MCP server. The read-only role is the last line of defence.
 - **G6 Streamlit + async:** use one background event loop (Phase 11).
 - **G7 Chroma distance:** create every collection with the cosine space, and convert distance to similarity (`1 − distance`).
 - **G8 Northwind dates:** the data covers 1996–98 unless you shift it.
-- **G9 Stdio child environment:** the spawned DB server may get only a whitelist of environment variables. Pass `env` explicitly in the server config, or load `.env` from an absolute path.
-- **G10 Postgres `:latest` + anonymous volume:** pin the image to `postgres:18` and use a named volume through compose (Phase 1).
+- **G9 Server settings (stdio gotcha, n/a for HTTP):** each MCP server loads its own settings from `.env` (`ENV_FILE` overrides the path), so there is no child-process environment to forward. Use `/ready` to see what a server can reach.
+- **G10 Postgres `:latest` + anonymous volume:** pin the image (built with `postgres:14.24`) and use a named volume through compose (Phase 1).
 
 ## Verification (end-to-end)
 1. Start the stack:
    - `docker compose up -d`;
    - Ollama running;
    - the web MCP server;
-   - `uv run streamlit run src/agentic_chatbot/ui/streamlit_app.py`.
+   - `uv run streamlit run src/multi_agenti_conversation_system/ui/streamlit_app.py`.
 2. In one chat, ask a web, a SQL, a hybrid and a direct question. Check the citations and the SQL shown.
 3. A PII query triggers HITL approval. A DELETE attempt is blocked.
 4. A paraphrase hits the cache. The `product_id 100 → 150` pair misses.
