@@ -2,10 +2,11 @@ services:
   postgres:
     image: postgres:14.24
     container_name: agent-postgres
-    restart : unless-stopped
+    restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be set}
-    ports: ["5432:5432"]
+    # Bound to loopback: the databases are for the local app only.
+    ports: ["127.0.0.1:5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data      # NOT .../postgresql/data (see note below)
       - ./db:/db:ro                      # so psql inside the container can read our SQL files
@@ -14,17 +15,40 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-  
+
   chroma:
     image: chromadb/chroma:1.0.21
     container_name: agent-chroma
-    restart : unless-stopped
-    ports: ["5430:8000"]
+    restart: unless-stopped
+    ports: ["127.0.0.1:5430:8000"]
     volumes:
       - chromedata:/data
+    healthcheck:
+      # The image has bash but no curl, wget or python, so open the socket with bash.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8000 &&
+          printf 'GET /api/v2/heartbeat HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          head -n1 <&3 | grep -q ' 200 '
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Optional trace viewer: docker compose --profile tracing up -d jaeger
+  # then run the DB server with OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+  # and open http://localhost:16686
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    container_name: agent-jaeger
+    profiles: ["tracing"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:16686:16686"   # UI
+      - "127.0.0.1:4318:4318"     # OTLP over HTTP
 
 volumes:
   pgdata:
   chromedata:
-
-  
