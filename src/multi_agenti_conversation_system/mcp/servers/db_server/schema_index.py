@@ -8,10 +8,10 @@ and the catalog are passed in, so nothing here reads settings or builds its own 
 import hashlib
 from typing import Any
 
-import chromadb
 import httpx
 import ollama
 from chromadb import Collection
+from chromadb.api import ClientAPI
 from chromadb.errors import ChromaError
 from langchain_core.embeddings import Embeddings
 
@@ -45,7 +45,7 @@ def _few_shot_id(question: str) -> str:
 
 class SchemaIndex:
     def __init__(
-        self, client: chromadb.ClientAPI, embeddings: Embeddings, catalog: SchemaCatalog
+        self, client: ClientAPI, embeddings: Embeddings, catalog: SchemaCatalog
     ):
         self._client = client
         self._embeddings = embeddings
@@ -63,7 +63,10 @@ class SchemaIndex:
         collection = self._collection(name)
         vectors = self._embeddings.embed_documents(documents)
         collection.upsert(
-            ids=ids, documents=documents, metadatas=metadatas, embeddings=vectors
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=vectors,  # pyright: ignore[reportArgumentType]  # lists of floats are accepted
         )
         # Remove entries whose table/question no longer exists in the YAML files.
         stale = set(collection.get(include=[])["ids"]) - set(ids)

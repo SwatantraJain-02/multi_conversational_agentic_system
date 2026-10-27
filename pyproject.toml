@@ -42,6 +42,8 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.15",
+    "pyright>=1.1.414",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.17.0",
@@ -55,4 +57,78 @@ addopts = "-m 'not integration and not live'"
 markers = [
     "integration: needs the docker compose services (Postgres, Chroma)",
     "live: calls external model APIs (OpenRouter, Ollama)",
+]
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+# E501 is left to `ruff format`; the rest is the usual correctness/modernisation set.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
+
+[tool.importlinter]
+root_package = "multi_agenti_conversation_system"
+include_external_packages = true
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+name = "The pure core imports no settings, adapters or infrastructure"
+type = "forbidden"
+source_modules = [
+    "multi_agenti_conversation_system.catalog",
+    "multi_agenti_conversation_system.guardrails",
+    "multi_agenti_conversation_system.mcp.contracts",
+]
+forbidden_modules = [
+    "multi_agenti_conversation_system.config",
+    "multi_agenti_conversation_system.llm",
+    "multi_agenti_conversation_system.vectorstore",
+    "multi_agenti_conversation_system.observability",
+    "multi_agenti_conversation_system.mcp.servers",
+    "psycopg",
+    "psycopg_pool",
+    "chromadb",
+    "httpx",
+    "ollama",
+    "uvicorn",
+    "starlette",
+    "mcp",
+    "langchain_core",
+    "langchain_ollama",
+    "langchain_openrouter",
+]
+
+[[tool.importlinter.contracts]]
+name = "Adapters and services receive settings as arguments"
+type = "forbidden"
+source_modules = [
+    "multi_agenti_conversation_system.mcp.servers.db_server.db",
+    "multi_agenti_conversation_system.mcp.servers.db_server.schema_index",
+    "multi_agenti_conversation_system.mcp.servers.db_server.service",
+    "multi_agenti_conversation_system.mcp.servers.http_auth",
+    "multi_agenti_conversation_system.observability",
+]
+forbidden_modules = ["multi_agenti_conversation_system.config"]
+
+[[tool.importlinter.contracts]]
+name = "Model and vector-store adapters know nothing about MCP servers"
+type = "forbidden"
+source_modules = [
+    "multi_agenti_conversation_system.llm",
+    "multi_agenti_conversation_system.vectorstore",
+]
+forbidden_modules = ["multi_agenti_conversation_system.mcp"]
+
+[[tool.importlinter.contracts]]
+name = "DB server layers: transport -> service -> adapters"
+type = "layers"
+layers = [
+    "multi_agenti_conversation_system.mcp.servers.db_server.server",
+    "multi_agenti_conversation_system.mcp.servers.db_server.service",
+    "multi_agenti_conversation_system.mcp.servers.db_server.db | multi_agenti_conversation_system.mcp.servers.db_server.schema_index",
 ]

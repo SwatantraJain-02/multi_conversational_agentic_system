@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # No .env in CI: the offline unit tests must not depend on one.
+      ENV_FILE: /nonexistent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: uv run lint-imports
+      # Offline unit tests only. The default pytest options deselect `integration`
+      # (needs docker compose) and `live` (calls model APIs).
+      - run: uv run pytest

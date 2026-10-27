@@ -10,7 +10,7 @@ attributes or INFO logs. Attributes are counts, names and flags.
 import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from opentelemetry import trace
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
@@ -22,7 +22,10 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.trace import Span, Status, StatusCode
 
-from multi_agenti_conversation_system.config import ObservabilitySettings
+if TYPE_CHECKING:
+    # Type only: keeps this module free of config (and psycopg) at runtime, so the adapters
+    # that emit spans do not pull settings in with it.
+    from multi_agenti_conversation_system.config import ObservabilitySettings
 
 _TRACER_NAME = "multi_agenti_conversation_system"
 

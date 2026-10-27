@@ -17,7 +17,7 @@ QUERY = "Prime Minister of India is Narendra Modi"
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     return dot / (math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b)))
 
 
@@ -65,7 +65,9 @@ def phase_write(client: chromadb.ClientAPI) -> None:
     )
 
     print(f"\nquery: {QUERY!r}")
-    for doc, distance in zip(result["documents"][0], result["distances"][0]):
+    for doc, distance in zip(
+        result["documents"][0], result["distances"][0], strict=True
+    ):
         print(f"  distance={distance:.4f}  similarity={1 - distance:.4f}  {doc}")
 
     # The proof: Chroma's number must match the cosine similarity we compute by hand.

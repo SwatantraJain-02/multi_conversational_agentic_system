@@ -61,14 +61,14 @@ def _reject(error: str) -> ValidationResult:
     return ValidationResult(ok=False, error=error)
 
 
-def _check_forbidden_nodes(tree: exp.Expression) -> str | None:
+def _check_forbidden_nodes(tree: exp.Expr) -> str | None:
     for node in tree.walk():
         if isinstance(node, FORBIDDEN_NODES):
             return f"{type(node).__name__} statements are not allowed; only SELECT is permitted"
     return None
 
 
-def _check_functions(tree: exp.Expression) -> str | None:
+def _check_functions(tree: exp.Expr) -> str | None:
     for func in tree.find_all(exp.Anonymous):
         name = str(func.name).lower()
         if name in FORBIDDEN_FUNCTIONS or name.startswith(FORBIDDEN_FUNCTION_PREFIXES):
@@ -77,7 +77,7 @@ def _check_functions(tree: exp.Expression) -> str | None:
 
 
 def _check_tables(
-    tree: exp.Expression, allowed_tables: set[str]
+    tree: exp.Expr, allowed_tables: set[str]
 ) -> tuple[set[str], str | None]:
     cte_names = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
     allowed = {t.lower() for t in allowed_tables}
@@ -101,7 +101,7 @@ def _check_tables(
     return used, None
 
 
-def _apply_limit(tree: exp.Expression, max_rows: int) -> exp.Expression:
+def _apply_limit(tree: exp.Query, max_rows: int) -> exp.Query:
     limit = tree.args.get("limit")
     if isinstance(limit, exp.Limit):
         value = limit.expression
@@ -161,7 +161,7 @@ def _real_tables_in_scope(select: exp.Select, cte_names: set[str]) -> list[exp.T
     ]
 
 
-def _enclosing_selects(node: exp.Expression):
+def _enclosing_selects(node: exp.Expr):
     """The SELECT a node sits in, then the SELECTs around it (for correlated subqueries)."""
     select = node.find_ancestor(exp.Select)
     while select is not None:

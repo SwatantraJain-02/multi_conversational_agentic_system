@@ -1,23 +1,26 @@
 """Chroma adapter: one HTTP client per process, collections that measure cosine distance."""
 
 import logging
+from typing import TYPE_CHECKING
 
 import chromadb
 import httpx
 from chromadb import Collection
+from chromadb.api import ClientAPI
 
-from multi_agenti_conversation_system.config import ChromaSettings
+if TYPE_CHECKING:
+    from multi_agenti_conversation_system.config import ChromaSettings
 
 logger = logging.getLogger(__name__)
 
 
-def build_chroma_client(cfg: ChromaSettings) -> chromadb.ClientAPI:
+def build_chroma_client(cfg: ChromaSettings) -> ClientAPI:
     client = chromadb.HttpClient(host=cfg.CHROMADB_HOST, port=cfg.CHROMADB_PORT)
     _set_request_timeout(client, cfg.CHROMA_TIMEOUT_S)
     return client
 
 
-def _set_request_timeout(client: chromadb.ClientAPI, seconds: float) -> None:
+def _set_request_timeout(client: ClientAPI, seconds: float) -> None:
     # chromadb 1.0.x builds its httpx session with timeout=None and has no setting to change
     # it, so a hung server would block a tool call forever. The session is private API; the
     # chromadb<1.1 pin in pyproject.toml keeps this stable, and we warn if it ever moves.
@@ -30,7 +33,7 @@ def _set_request_timeout(client: chromadb.ClientAPI, seconds: float) -> None:
         )
 
 
-def get_collection(client: chromadb.ClientAPI, name: str) -> Collection:
+def get_collection(client: ClientAPI, name: str) -> Collection:
     """Get or create a collection that measures cosine distance (Chroma defaults to L2).
 
     Always pass `embeddings=` / `query_embeddings=` yourself. These collections have a
