@@ -1,10 +1,10 @@
 import pytest
 
+from multi_agenti_conversation_system.catalog import SchemaCatalog
 from multi_agenti_conversation_system.guardrails.sql_validator import (
     find_pii_columns,
     validate_select,
 )
-from multi_agenti_conversation_system.mcp.servers.db_server import catalog
 
 ALLOWED = {"orders", "customers", "products", "order_details"}
 MAX_ROWS = 100
@@ -185,9 +185,9 @@ def test_find_pii_columns(sql, expected):
     assert find_pii_columns(sql, PII) == expected
 
 
-def test_pii_detection_matches_the_few_shot_pii_flags():
+def test_pii_detection_matches_the_few_shot_pii_flags(catalog: SchemaCatalog):
     """The 20 seed examples were hand-tagged `pii: true`; the detector must agree."""
     pii = catalog.pii_columns()
-    for example in catalog.few_shots():
+    for example in catalog.few_shots:
         flagged = bool(find_pii_columns(example["sql"], pii))
         assert flagged == example.get("pii", False), example["question"]

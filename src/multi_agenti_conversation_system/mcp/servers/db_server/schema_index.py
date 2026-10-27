@@ -9,8 +9,9 @@ from typing import Any
 
 from chromadb import Collection
 
+from multi_agenti_conversation_system.catalog import load_catalog
+from multi_agenti_conversation_system.config import get_path_settings
 from multi_agenti_conversation_system.llm import get_embedding_model
-from multi_agenti_conversation_system.mcp.servers.db_server import catalog
 from multi_agenti_conversation_system.vectorstore import get_collection
 
 SCHEMA_COLLECTION = "schema_docs"
@@ -40,8 +41,9 @@ def _upsert(collection: Collection, ids, documents, metadatas) -> None:
 
 def build_index() -> dict[str, int]:
     """(Re)build both collections from data/*.yaml and return their sizes."""
+    catalog = load_catalog(get_path_settings().DATA_DIR)
     pii = catalog.pii_columns()
-    tables = list(catalog.schema_tables())
+    tables = list(catalog.tables)
     schema = get_collection(SCHEMA_COLLECTION)
     _upsert(
         schema,
@@ -57,7 +59,7 @@ def build_index() -> dict[str, int]:
         ],
     )
 
-    examples = catalog.few_shots()
+    examples = catalog.few_shots
     few_shots = get_collection(FEW_SHOT_COLLECTION)
     _upsert(
         few_shots,

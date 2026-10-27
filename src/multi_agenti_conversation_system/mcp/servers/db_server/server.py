@@ -18,19 +18,17 @@ from psycopg_pool import PoolTimeout
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from multi_agenti_conversation_system.catalog import SchemaCatalog, load_catalog
 from multi_agenti_conversation_system.config import (
     get_db_mcp_settings,
     get_db_settings,
+    get_path_settings,
 )
 from multi_agenti_conversation_system.guardrails.sql_validator import (
     find_pii_columns,
     validate_select,
 )
-from multi_agenti_conversation_system.mcp.servers.db_server import (
-    catalog,
-    db,
-    schema_index,
-)
+from multi_agenti_conversation_system.mcp.servers.db_server import db, schema_index
 
 MAX_SQL_CHARS = 5000
 MAX_QUESTION_CHARS = 500
@@ -48,6 +46,10 @@ server = MCPServer(
 
 
 # --------------------------------------------------------------------------- helpers
+def _catalog() -> SchemaCatalog:
+    return load_catalog(get_path_settings().DATA_DIR)
+
+
 def _error(message: str) -> dict[str, Any]:
     return {"ok": False, "error": message}
 
@@ -65,9 +67,9 @@ def _check_search_args(question: str, k: int, domain: str | None) -> str | None:
         return problem
     if not 1 <= k <= MAX_K:
         return f"k must be between 1 and {MAX_K}"
-    domains = {info["domain"] for info in catalog.schema_tables().values()}
+    domains = _catalog().domains()
     if domain is not None and domain not in domains:
-        return f"Unknown domain '{domain}'. Valid domains: {sorted(domains)}"
+        return f"Unknown domain '{domain}'. Valid domains: {domains}"
     return None
 
 
@@ -83,14 +85,16 @@ async def list_tables() -> dict[str, Any]:
 
     Use this to get an overview. Use search_schema to find the tables relevant to a question.
     """
+    catalog = _catalog()
+    pii = catalog.pii_columns()
     tables = [
         {
             "table": name,
-            "domain": info["domain"],
-            "description": " ".join(info["description"].split()),
-            "has_pii": name.lower() in catalog.pii_columns(),
+            "domain": catalog.table_domain(name),
+            "description": catalog.table_description(name),
+            "has_pii": name.lower() in pii,
         }
-        for name, info in catalog.schema_tables().items()
+        for name in catalog.tables
     ]
     return {"ok": True, "tables": tables}
 
@@ -104,9 +108,10 @@ async def get_schema(tables: list[str]) -> dict[str, Any]:
     Args:
         tables: Table names, e.g. ["orders", "customers"] (case-insensitive).
     """
-    if not tables or len(tables) > len(catalog.schema_tables()):
-        return _error("Provide between 1 and 14 table names")
-    known = {name.lower(): name for name in catalog.schema_tables()}
+    catalog = _catalog()
+    if not tables or len(tables) > len(catalog):
+        return _error(f"Provide between 1 and {len(catalog)} table names")
+    known = {name.lower(): name for name in catalog.tables}
     unknown = [t for t in tables if t.lower() not in known]
     if unknown:
         return _error(f"Unknown tables: {unknown}. Known tables: {sorted(known)}")
@@ -170,6 +175,7 @@ async def explain_query(sql: str) -> dict[str, Any]:
     """
     if problem := _check_text(sql, "sql", MAX_SQL_CHARS):
         return _error(problem)
+    catalog = _catalog()
     checked = validate_select(sql, get_db_settings().MAX_ROWS, catalog.table_names())
     if not checked.ok:
         return _error(checked.error or "Query rejected")
@@ -207,6 +213,7 @@ async def run_select_query(sql: str, max_rows: int | None = None) -> dict[str, A
         return _error(f"max_rows must be between 1 and {server_max}")
 
     # Validate with one extra row so db.fetch_rows can tell if the result was cut off.
+    catalog = _catalog()
     checked = validate_select(sql, limit + 1, catalog.table_names())
     if not checked.ok:
         return _error(checked.error or "Query rejected")

@@ -5,22 +5,21 @@ Run from the project root (needs Chroma and Ollama running):
 Re-run whenever data/schema_descriptions.yaml or data/few_shots.yaml changes.
 """
 
-from multi_agenti_conversation_system.mcp.servers.db_server import (
-    catalog,
-    schema_index,
-)
-
-EXPECTED = {
-    schema_index.SCHEMA_COLLECTION: len(catalog.schema_tables()),
-    schema_index.FEW_SHOT_COLLECTION: len(catalog.few_shots()),
-}
+from multi_agenti_conversation_system.catalog import load_catalog
+from multi_agenti_conversation_system.config import get_path_settings
+from multi_agenti_conversation_system.mcp.servers.db_server import schema_index
 
 
 def main() -> None:
+    catalog = load_catalog(get_path_settings().DATA_DIR)
+    expected = {
+        schema_index.SCHEMA_COLLECTION: len(catalog),
+        schema_index.FEW_SHOT_COLLECTION: len(catalog.few_shots),
+    }
     counts = schema_index.build_index()
     for name, count in counts.items():
         status = (
-            "OK" if count == EXPECTED[name] else f"MISMATCH (expected {EXPECTED[name]})"
+            "OK" if count == expected[name] else f"MISMATCH (expected {expected[name]})"
         )
         print(f"{name}: {count} documents  {status}")
 
