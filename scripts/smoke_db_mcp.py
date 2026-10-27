@@ -143,6 +143,8 @@ async def main() -> None:
         except httpx.ConnectError:
             sys.exit(f"Cannot reach {BASE_URL}. Is the DB MCP server running?")
         check("/health is open and returns 200", health.status_code == 200)
+        ready = await anonymous.get(f"{BASE_URL}/ready", timeout=10)
+        check("/ready is open and returns 200", ready.status_code == 200, ready.text)
 
         no_token = await anonymous.post(MCP_URL, json={})
         check("no token -> 401", no_token.status_code == 401)

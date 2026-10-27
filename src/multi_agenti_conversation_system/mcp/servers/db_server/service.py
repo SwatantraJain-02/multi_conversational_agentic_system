@@ -1,13 +1,14 @@
 """All DB MCP tool logic, independent of the MCP transport.
 
 The service checks what the agent sent, runs the SQL guardrail, and calls the reader and the
-index it was given. Failures are raised as ToolError subclasses (ToolInputError, QueryFailed,
-BackendUnavailable); server.py turns them into {"ok": False, "error": ...} responses.
-Tests drive it with fakes, no server or database needed.
+index it was given, and returns the typed responses from mcp.contracts.db. Failures are
+raised as ToolError subclasses (ToolInputError, QueryFailed, BackendUnavailable); server.py
+turns them into the same response model with ok=False. Tests drive it with fakes, no server
+or database needed.
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -15,6 +16,17 @@ from multi_agenti_conversation_system.catalog import SchemaCatalog
 from multi_agenti_conversation_system.guardrails.sql_validator import (
     find_pii_columns,
     validate_select,
+)
+from multi_agenti_conversation_system.mcp.contracts.db import (
+    ExplainResponse,
+    FewShot,
+    FewShotsResponse,
+    GetSchemaResponse,
+    ListTablesResponse,
+    SchemaHit,
+    SearchSchemaResponse,
+    SelectResponse,
+    TableSummary,
 )
 from multi_agenti_conversation_system.mcp.servers.db_server.db import (
     DatabaseUnavailable,
@@ -79,14 +91,37 @@ class DbToolService:
         reader: DbReader,
         index: SchemaSearch,
         limits: ToolLimits,
+        extra_checks: Mapping[str, Callable[[], bool]] | None = None,
+        check_timeout_s: float = 2.0,
     ):
         self.catalog = catalog
         self.reader = reader
         self.index = index
         self.limits = limits
+        self.extra_checks = dict(extra_checks or {})
+        self.check_timeout_s = check_timeout_s
 
     def close(self) -> None:
         self.reader.close()
+
+    # ------------------------------------------------------------------ readiness
+    async def readiness(self) -> dict[str, bool]:
+        """Can every dependency answer right now? Checks run concurrently, each time-boxed."""
+        checks: dict[str, Callable[[], bool]] = {
+            "postgres": lambda: self.reader.ping(self.check_timeout_s),
+            "chroma": self.index.ping,
+            "schema_index": self.index.is_built,
+            **self.extra_checks,
+        }
+
+        async def run(check: Callable[[], bool]) -> bool:
+            try:
+                return await asyncio.wait_for(_in_thread(check), self.check_timeout_s)
+            except Exception:  # noqa: BLE001 - any failure means "not ready"
+                return False
+
+        results = await asyncio.gather(*(run(c) for c in checks.values()))
+        return dict(zip(checks, results, strict=True))
 
     # ------------------------------------------------------------------ input checks
     @staticmethod
@@ -112,21 +147,21 @@ class DbToolService:
         return checked
 
     # ------------------------------------------------------------------ tools
-    async def list_tables(self) -> dict[str, Any]:
+    async def list_tables(self) -> ListTablesResponse:
         catalog = self.catalog
         pii = catalog.pii_columns()
         tables = [
-            {
-                "table": name,
-                "domain": catalog.table_domain(name),
-                "description": catalog.table_description(name),
-                "has_pii": name.lower() in pii,
-            }
+            TableSummary(
+                table=name,
+                domain=catalog.table_domain(name),
+                description=catalog.table_description(name),
+                has_pii=name.lower() in pii,
+            )
             for name in catalog.tables
         ]
-        return {"tables": tables}
+        return ListTablesResponse(ok=True, tables=tables)
 
-    async def get_schema(self, tables: list[str]) -> dict[str, Any]:
+    async def get_schema(self, tables: list[str]) -> GetSchemaResponse:
         catalog = self.catalog
         if not tables or len(tables) > len(catalog):
             raise ToolInputError(f"Provide between 1 and {len(catalog)} table names")
@@ -139,29 +174,29 @@ class DbToolService:
         docs = {
             known[t.lower()]: catalog.table_document(known[t.lower()]) for t in tables
         }
-        return {"schemas": docs}
+        return GetSchemaResponse(ok=True, schemas=docs)
 
     async def search_schema(
         self, question: str, k: int, domain: str | None
-    ) -> dict[str, Any]:
+    ) -> SearchSchemaResponse:
         self._check_search_args(question, k, domain)
         try:
             hits = await _in_thread(self.index.search_schema, question, k, domain)
         except SearchUnavailable as exc:
             raise BackendUnavailable(f"Schema search is unavailable: {exc}") from exc
-        return {"tables": hits}
+        return SearchSchemaResponse(ok=True, tables=[SchemaHit(**h) for h in hits])
 
     async def get_few_shots(
         self, question: str, k: int, domain: str | None
-    ) -> dict[str, Any]:
+    ) -> FewShotsResponse:
         self._check_search_args(question, k, domain)
         try:
             hits = await _in_thread(self.index.search_few_shots, question, k, domain)
         except SearchUnavailable as exc:
             raise BackendUnavailable(f"Example search is unavailable: {exc}") from exc
-        return {"examples": hits}
+        return FewShotsResponse(ok=True, examples=[FewShot(**h) for h in hits])
 
-    async def explain_query(self, sql: str) -> dict[str, Any]:
+    async def explain_query(self, sql: str) -> ExplainResponse:
         checked = self._validated(sql, self.limits.max_rows)
         try:
             estimated_rows = await _in_thread(self.reader.explain, checked.sql)
@@ -170,15 +205,16 @@ class DbToolService:
         except QueryError as exc:
             raise QueryFailed(str(exc) or "Query failed") from exc
         pii = find_pii_columns(checked.sql, self.catalog.pii_columns())
-        return {
-            "sql": checked.sql,
-            "tables": sorted(checked.tables),
-            "estimated_rows": estimated_rows,
-            "touches_pii": bool(pii),
-            "pii_columns": pii,
-        }
+        return ExplainResponse(
+            ok=True,
+            sql=checked.sql,
+            tables=sorted(checked.tables),
+            estimated_rows=estimated_rows,
+            touches_pii=bool(pii),
+            pii_columns=pii,
+        )
 
-    async def run_select_query(self, sql: str, max_rows: int | None) -> dict[str, Any]:
+    async def run_select_query(self, sql: str, max_rows: int | None) -> SelectResponse:
         self._check_text(sql, "sql", self.limits.max_sql_chars)
         server_max = self.limits.max_rows
         limit = server_max if max_rows is None else max_rows
@@ -193,8 +229,9 @@ class DbToolService:
             raise BackendUnavailable(str(exc)) from exc
         except QueryError as exc:
             raise QueryFailed(str(exc) or "Query failed") from exc
-        return {
-            "sql": checked.sql,
-            "pii_columns": find_pii_columns(checked.sql, self.catalog.pii_columns()),
+        return SelectResponse(
+            ok=True,
+            sql=checked.sql,
+            pii_columns=find_pii_columns(checked.sql, self.catalog.pii_columns()),
             **result,
-        }
+        )
