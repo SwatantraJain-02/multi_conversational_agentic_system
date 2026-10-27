@@ -14,10 +14,10 @@ import httpx
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from multi_agenti_conversation_system.config import settings
+from multi_agenti_conversation_system.config import get_db_mcp_settings
 
-BASE_URL = f"http://{settings.DB_MCP_HOST}:{settings.DB_MCP_PORT}"
-MCP_URL = f"{BASE_URL}/mcp"
+BASE_URL = get_db_mcp_settings().base_url
+MCP_URL = get_db_mcp_settings().url
 EXPECTED_TOOLS = {
     "list_tables",
     "get_schema",
@@ -136,7 +136,7 @@ async def run_checks(session: ClientSession) -> None:
 
 
 async def main() -> None:
-    token = settings.DB_MCP_TOKEN
+    token = get_db_mcp_settings().DB_MCP_TOKEN.get_secret_value()
     async with httpx.AsyncClient() as anonymous:
         try:
             health = await anonymous.get(f"{BASE_URL}/health", timeout=5)

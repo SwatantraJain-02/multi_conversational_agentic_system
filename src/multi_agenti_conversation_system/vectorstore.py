@@ -1,11 +1,12 @@
 import chromadb
 from chromadb import Collection
 
-from multi_agenti_conversation_system.config import settings
+from multi_agenti_conversation_system.config import get_chroma_settings
 
 
 def get_chroma_client() -> chromadb.ClientAPI:
-    return chromadb.HttpClient(host=settings.CHROMADB_HOST, port=settings.CHROMADB_PORT)
+    cfg = get_chroma_settings()
+    return chromadb.HttpClient(host=cfg.CHROMADB_HOST, port=cfg.CHROMADB_PORT)
 
 
 def get_collection(name: str) -> Collection:

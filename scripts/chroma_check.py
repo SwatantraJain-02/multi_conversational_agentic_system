@@ -4,7 +4,7 @@ import math
 import chromadb
 from chromadb import Collection
 
-from multi_agenti_conversation_system.config import settings
+from multi_agenti_conversation_system.config import get_chroma_settings
 from multi_agenti_conversation_system.llm import get_embedding_model
 
 COLLECTION_NAME = "phase1_check"
@@ -21,7 +21,8 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 def get_client() -> chromadb.ClientAPI:
-    return chromadb.HttpClient(host=settings.CHROMADB_HOST, port=settings.CHROMADB_PORT)
+    cfg = get_chroma_settings()
+    return chromadb.HttpClient(host=cfg.CHROMADB_HOST, port=cfg.CHROMADB_PORT)
 
 
 def delete_if_exists(client: chromadb.ClientAPI) -> None:

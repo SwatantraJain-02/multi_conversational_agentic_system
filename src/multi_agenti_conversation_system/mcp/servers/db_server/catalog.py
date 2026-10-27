@@ -10,10 +10,10 @@ from typing import Any
 
 import yaml
 
-from multi_agenti_conversation_system.config import BASE_DIR
+from multi_agenti_conversation_system.config import get_path_settings
 
-SCHEMA_FILE = BASE_DIR / "data" / "schema_descriptions.yaml"
-FEW_SHOTS_FILE = BASE_DIR / "data" / "few_shots.yaml"
+SCHEMA_FILE = get_path_settings().DATA_DIR / "schema_descriptions.yaml"
+FEW_SHOTS_FILE = get_path_settings().DATA_DIR / "few_shots.yaml"
 
 
 def load_yaml(path: Path) -> dict[str, Any]:

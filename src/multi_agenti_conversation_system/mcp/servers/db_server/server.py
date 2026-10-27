@@ -18,7 +18,10 @@ from psycopg_pool import PoolTimeout
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from multi_agenti_conversation_system.config import settings
+from multi_agenti_conversation_system.config import (
+    get_db_mcp_settings,
+    get_db_settings,
+)
 from multi_agenti_conversation_system.guardrails.sql_validator import (
     find_pii_columns,
     validate_select,
@@ -167,7 +170,7 @@ async def explain_query(sql: str) -> dict[str, Any]:
     """
     if problem := _check_text(sql, "sql", MAX_SQL_CHARS):
         return _error(problem)
-    checked = validate_select(sql, settings.MAX_ROWS, catalog.table_names())
+    checked = validate_select(sql, get_db_settings().MAX_ROWS, catalog.table_names())
     if not checked.ok:
         return _error(checked.error or "Query rejected")
     try:
@@ -198,9 +201,10 @@ async def run_select_query(sql: str, max_rows: int | None = None) -> dict[str, A
     """
     if problem := _check_text(sql, "sql", MAX_SQL_CHARS):
         return _error(problem)
-    limit = settings.MAX_ROWS if max_rows is None else max_rows
-    if not 1 <= limit <= settings.MAX_ROWS:
-        return _error(f"max_rows must be between 1 and {settings.MAX_ROWS}")
+    server_max = get_db_settings().MAX_ROWS
+    limit = server_max if max_rows is None else max_rows
+    if not 1 <= limit <= server_max:
+        return _error(f"max_rows must be between 1 and {server_max}")
 
     # Validate with one extra row so db.fetch_rows can tell if the result was cut off.
     checked = validate_select(sql, limit + 1, catalog.table_names())
@@ -250,16 +254,16 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-app = BearerAuth(server.streamable_http_app(), token=settings.DB_MCP_TOKEN)
-
-
 def main() -> None:
-    if not settings.DB_MCP_TOKEN and not _is_loopback(settings.DB_MCP_HOST):
+    cfg = get_db_mcp_settings()
+    token = cfg.DB_MCP_TOKEN.get_secret_value()
+    if not token and not _is_loopback(cfg.DB_MCP_HOST):
         raise SystemExit(
             "Refusing to listen on a non-local address without DB_MCP_TOKEN set."
         )
+    app = BearerAuth(server.streamable_http_app(), token=token)
     try:
-        uvicorn.run(app, host=settings.DB_MCP_HOST, port=settings.DB_MCP_PORT)
+        uvicorn.run(app, host=cfg.DB_MCP_HOST, port=cfg.DB_MCP_PORT)
     finally:
         db.close_pool()
 

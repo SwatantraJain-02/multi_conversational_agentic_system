@@ -12,7 +12,7 @@ from uuid import UUID
 import psycopg
 from psycopg_pool import ConnectionPool
 
-from multi_agenti_conversation_system.config import settings
+from multi_agenti_conversation_system.config import get_db_settings
 
 __pool: ConnectionPool | None = None
 
@@ -25,10 +25,15 @@ def get_pool() -> ConnectionPool:
     global __pool
 
     if __pool is None:
+        cfg = get_db_settings()
         __pool = ConnectionPool(
-            settings.northwind_conninfo, min_size=1, max_size=5, open=False
+            cfg.conninfo,
+            min_size=cfg.DB_POOL_MIN_SIZE,
+            max_size=cfg.DB_POOL_MAX_SIZE,
+            timeout=cfg.DB_POOL_CHECKOUT_TIMEOUT_S,
+            open=False,
         )
-        __pool.open(wait=True, timeout=10)
+        __pool.open(wait=True, timeout=cfg.DB_POOL_OPEN_TIMEOUT_S)
 
     return __pool
 

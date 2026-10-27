@@ -13,7 +13,10 @@ from typing import Literal
 from langchain_core.tools import tool
 from pydantic import BaseModel
 
-from multi_agenti_conversation_system.config import settings
+from multi_agenti_conversation_system.config import (
+    get_chat_settings,
+    get_embedding_settings,
+)
 from multi_agenti_conversation_system.llm import get_chat_model, get_embedding_model
 
 failures: list[str] = []
@@ -107,7 +110,10 @@ def check_embeddings() -> None:
 
 
 def main() -> None:
-    print(f"chat model: {settings.CHAT_MODEL}   embeddings: {settings.EMBED_MODEL}\n")
+    print(
+        f"chat model: {get_chat_settings().CHAT_MODEL}   "
+        f"embeddings: {get_embedding_settings().EMBED_MODEL}\n"
+    )
     for check in (
         check_tool_calling,
         check_structured_output,
