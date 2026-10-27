@@ -6,6 +6,7 @@ from chromadb import Collection
 
 from multi_agenti_conversation_system.config import get_chroma_settings
 from multi_agenti_conversation_system.llm import get_embedding_model
+from multi_agenti_conversation_system.vectorstore import build_chroma_client
 
 COLLECTION_NAME = "phase1_check"
 
@@ -18,11 +19,6 @@ QUERY = "Prime Minister of India is Narendra Modi"
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     return dot / (math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b)))
-
-
-def get_client() -> chromadb.ClientAPI:
-    cfg = get_chroma_settings()
-    return chromadb.HttpClient(host=cfg.CHROMADB_HOST, port=cfg.CHROMADB_PORT)
 
 
 def delete_if_exists(client: chromadb.ClientAPI) -> None:
@@ -111,7 +107,7 @@ def main():
     parser.add_argument("--phase", choices=["write", "verify"], default="write")
     args = parser.parse_args()
 
-    client = get_client()
+    client = build_chroma_client(get_chroma_settings())
     if args.phase == "write":
         phase_write(client)
     else:

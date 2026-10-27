@@ -40,8 +40,8 @@ class NorthwindDbSettings(_Base):
     MAX_ROWS: int = Field(100, ge=1)
     DB_POOL_MIN_SIZE: int = Field(1, ge=1)
     DB_POOL_MAX_SIZE: int = Field(5, ge=1)
-    DB_POOL_OPEN_TIMEOUT_S: float = Field(10, gt=0)
-    DB_POOL_CHECKOUT_TIMEOUT_S: float = Field(30, gt=0)
+    # How long a query waits for a pooled connection (e.g. while Postgres is down).
+    DB_POOL_CHECKOUT_TIMEOUT_S: float = Field(10, gt=0)
     DB_CONNECT_TIMEOUT_S: int = Field(5, gt=0)  # libpq wants whole seconds
 
     # Field validators (not model validators) so an error message never echoes the whole

@@ -1,7 +1,7 @@
 [project]
 name = "multi-agenti-conversation-system"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-agent chatbot (LangGraph + MCP) that answers web, database and hybrid questions"
 readme = "README.md"
 authors = [
     { name = "Swatantra Jain" }
@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.scripts]
-multi-agenti-conversation-system = "multi_agenti_conversation_system:main"
+db-mcp-server = "multi_agenti_conversation_system.mcp.servers.db_server.server:main"
 
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]

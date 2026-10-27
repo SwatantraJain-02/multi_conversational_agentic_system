@@ -4,46 +4,22 @@ Callers must run the SQL through guardrails.sql_validator first. The read-only r
 (default_transaction_read_only, statement_timeout=5s) is the last line of defence if they don't.
 """
 
+import threading
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Self
 from uuid import UUID
 
 import psycopg
-from psycopg_pool import ConnectionPool
-
-from multi_agenti_conversation_system.config import get_db_settings
-
-__pool: ConnectionPool | None = None
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 
 class QueryError(Exception):
     """A database failure with a short message that is safe to show to the agent."""
 
 
-def get_pool() -> ConnectionPool:
-    global __pool
-
-    if __pool is None:
-        cfg = get_db_settings()
-        __pool = ConnectionPool(
-            cfg.conninfo,
-            min_size=cfg.DB_POOL_MIN_SIZE,
-            max_size=cfg.DB_POOL_MAX_SIZE,
-            timeout=cfg.DB_POOL_CHECKOUT_TIMEOUT_S,
-            open=False,
-        )
-        __pool.open(wait=True, timeout=cfg.DB_POOL_OPEN_TIMEOUT_S)
-
-    return __pool
-
-
-def close_pool() -> None:
-    global __pool
-
-    if __pool is not None:
-        __pool.close()
-        __pool = None
+class DatabaseUnavailable(QueryError):
+    """No connection could be obtained: Postgres is down or the pool is exhausted."""
 
 
 def to_jsonable(value: Any) -> Any:
@@ -70,38 +46,96 @@ def _short_message(exc: psycopg.Error) -> str:
     return f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"
 
 
-def fetch_rows(sql: str, max_rows: int) -> dict[str, Any]:
-    """Run a query and return {columns, rows, row_count, truncated}.
+class NorthwindReader:
+    """Read-only queries over a connection pool that is opened on first use."""
 
-    Fetches one row more than max_rows so we can tell whether the result was cut off.
-    """
-    try:
-        with get_pool().connection() as conn, conn.cursor() as cur:
-            # No second argument: a '%' in the SQL (e.g. LIKE 'V%') is then plain text.
-            cur.execute(sql)
+    def __init__(
+        self,
+        conninfo: str,
+        *,
+        min_size: int = 1,
+        max_size: int = 5,
+        checkout_timeout_s: float = 10,
+    ):
+        self._pool = ConnectionPool(
+            conninfo,
+            min_size=min_size,
+            max_size=max_size,
+            timeout=checkout_timeout_s,
+            open=False,
+        )
+        self._opened = False
+        self._lock = threading.Lock()
+
+    def _ensure_open(self) -> None:
+        # Lazy, and without wait=True: a timed-out wait() closes the pool for good, which
+        # would leave every later query failing with PoolClosed after one Postgres outage.
+        # Opened this way the pool keeps reconnecting in the background, and each query
+        # waits at most checkout_timeout_s for a connection.
+        with self._lock:
+            if not self._opened:
+                self._pool.open(wait=False)
+                self._opened = True
+
+    def _run(self, sql: str, fetch, timeout_s: float | None = None) -> Any:
+        try:
+            self._ensure_open()
+            with self._pool.connection(timeout=timeout_s) as conn, conn.cursor() as cur:
+                # No second argument: a '%' in the SQL (e.g. LIKE 'V%') is then plain text.
+                cur.execute(sql)  # type: ignore[arg-type]  # validated SQL, not a literal
+                return fetch(cur)
+        except PoolTimeout as exc:
+            raise DatabaseUnavailable(
+                "Database unavailable: no connection within the timeout"
+            ) from exc
+        except psycopg.Error as exc:
+            raise QueryError(_short_message(exc)) from exc
+
+    def fetch_rows(self, sql: str, max_rows: int) -> dict[str, Any]:
+        """Run a query and return {columns, rows, row_count, truncated}.
+
+        Fetches one row more than max_rows so we can tell whether the result was cut off.
+        """
+
+        def fetch(cur: psycopg.Cursor) -> tuple[list[str], list[tuple[Any, ...]]]:
             if cur.description is None:
                 raise QueryError("The statement did not return rows")
-            columns = [col.name for col in cur.description]
-            fetched = cur.fetchmany(max_rows + 1)
-    except psycopg.Error as exc:
-        raise QueryError(_short_message(exc)) from exc
+            return [col.name for col in cur.description], cur.fetchmany(max_rows + 1)
 
-    truncated = len(fetched) > max_rows
-    rows = [[to_jsonable(v) for v in row] for row in fetched[:max_rows]]
-    return {
-        "columns": columns,
-        "rows": rows,
-        "row_count": len(rows),
-        "truncated": truncated,
-    }
+        columns, fetched = self._run(sql, fetch)
+        truncated = len(fetched) > max_rows
+        rows = [[to_jsonable(v) for v in row] for row in fetched[:max_rows]]
+        return {
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": truncated,
+        }
 
+    def explain(self, sql: str) -> int:
+        """Return the planner's row estimate. EXPLAIN without ANALYZE does not run the query."""
 
-def explain(sql: str) -> int:
-    """Return the planner's row estimate. EXPLAIN without ANALYZE does not run the query."""
-    try:
-        with get_pool().connection() as conn, conn.cursor() as cur:
-            cur.execute("EXPLAIN (FORMAT JSON) " + sql)
-            plan = cur.fetchone()[0]  # psycopg already parsed the JSON into a list
-    except psycopg.Error as exc:
-        raise QueryError(_short_message(exc)) from exc
-    return int(plan[0]["Plan"]["Plan Rows"])
+        def fetch(cur: psycopg.Cursor) -> Any:
+            row = cur.fetchone()
+            if row is None:
+                raise QueryError("EXPLAIN returned no plan")
+            return row[0]  # psycopg already parsed the JSON into a list
+
+        plan = self._run("EXPLAIN (FORMAT JSON) " + sql, fetch)
+        return int(plan[0]["Plan"]["Plan Rows"])
+
+    def ping(self, timeout_s: float) -> bool:
+        try:
+            self._run("SELECT 1", lambda cur: cur.fetchone(), timeout_s=timeout_s)
+        except QueryError:
+            return False
+        return True
+
+    def close(self) -> None:
+        self._pool.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()

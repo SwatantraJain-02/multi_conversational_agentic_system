@@ -60,7 +60,9 @@ class SchemaCatalog:
         """{table: {pii column names}} for tables that have at least one PII column."""
         result: dict[str, set[str]] = {}
         for table, info in self.tables.items():
-            cols = {col for col, meta in info["columns"].items() if meta.get("pii", False)}
+            cols = {
+                col for col, meta in info["columns"].items() if meta.get("pii", False)
+            }
             if cols:
                 result[table.lower()] = {c.lower() for c in cols}
         return result
