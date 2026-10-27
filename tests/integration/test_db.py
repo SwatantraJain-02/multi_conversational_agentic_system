@@ -10,6 +10,8 @@ from psycopg_pool import PoolTimeout
 
 from multi_agenti_conversation_system.mcp.servers.db_server import db
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(scope="module", autouse=True)
 def pool():
