@@ -14,8 +14,11 @@ HTTP routes besides /mcp: /health (liveness, always 200) and /ready (200 only wh
 Chroma, the schema index and Ollama all answer; 503 otherwise). Neither needs the token.
 """
 
+import logging
+import time
 from collections.abc import Awaitable
-from functools import partial
+from functools import partial, wraps
+from inspect import signature
 from textwrap import dedent
 
 import uvicorn
@@ -31,6 +34,7 @@ from multi_agenti_conversation_system.config import (
     get_db_settings,
     get_db_tool_limits,
     get_embedding_settings,
+    get_observability_settings,
     get_path_settings,
 )
 from multi_agenti_conversation_system.llm import build_embeddings, ping_ollama
@@ -56,7 +60,14 @@ from multi_agenti_conversation_system.mcp.servers.http_auth import (
     BearerAuth,
     is_loopback,
 )
+from multi_agenti_conversation_system.observability import (
+    configure_logging,
+    configure_tracing,
+    log_event,
+)
 from multi_agenti_conversation_system.vectorstore import build_chroma_client
+
+logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
     "Read-only access to the Northwind sales database (PostgreSQL). Typical flow: "
@@ -136,51 +147,80 @@ def _describe(tool: str, service: DbToolService) -> str:
     return dedent(DESCRIPTIONS[tool]).format(max_k=service.limits.max_k, domains=joined)
 
 
-async def _respond[R: ToolResponse](model: type[R], call: Awaitable[R]) -> R:
+async def _respond[R: ToolResponse](tool: str, model: type[R], call: Awaitable[R]) -> R:
+    """Await a service call, turn ToolError into ok=False, and log one line per tool call.
+
+    INFO carries counts and the error class only; the message can echo SQL, so it is DEBUG.
+    """
+    started = time.perf_counter()
+    error: ToolError | None = None
     try:
-        return await call
+        response = await call
     except ToolError as exc:
-        return model(ok=False, error=str(exc))
+        error = exc
+        response = model(ok=False, error=str(exc))
+    log_event(
+        logger,
+        "tool_call",
+        tool=tool,
+        ok=response.ok,
+        duration_ms=round((time.perf_counter() - started) * 1000),
+        row_count=getattr(response, "row_count", None),
+        error_type=type(error).__name__ if error else None,
+    )
+    if error:
+        log_event(logger, "tool_error", logging.DEBUG, tool=tool, message=str(error))
+    return response
 
 
 # ---------------------------------------------------------------------------- tools
 def create_server(service: DbToolService) -> MCPServer:
     server = MCPServer("northwind-db", instructions=INSTRUCTIONS)
 
-    def tool(name: str):
-        return server.tool(name=name, description=_describe(name, service))
+    def tool(response_model: type[ToolResponse]):
+        """Register an async function as the tool of the same name, with ok=False on ToolError
+        and one log line per call. The function just returns the service call."""
 
-    @tool("list_tables")
-    async def list_tables() -> ListTablesResponse:
-        return await _respond(ListTablesResponse, service.list_tables())
+        def register(fn):
+            @wraps(fn)
+            async def run(*args, **kwargs):
+                return await _respond(fn.__name__, response_model, fn(*args, **kwargs))
 
-    @tool("get_schema")
-    async def get_schema(tables: list[str]) -> GetSchemaResponse:
-        return await _respond(GetSchemaResponse, service.get_schema(tables))
+            # The SDK derives inputSchema from the parameters and outputSchema from the
+            # return annotation, so publish the typed response model as the latter.
+            run.__signature__ = signature(fn).replace(  # type: ignore[attr-defined]
+                return_annotation=response_model
+            )
+            server.tool(name=fn.__name__, description=_describe(fn.__name__, service))(
+                run
+            )
+            return run
 
-    @tool("search_schema")
-    async def search_schema(
-        question: str, k: int = 5, domain: str | None = None
-    ) -> SearchSchemaResponse:
-        return await _respond(
-            SearchSchemaResponse, service.search_schema(question, k, domain)
-        )
+        return register
 
-    @tool("get_few_shots")
-    async def get_few_shots(
-        question: str, k: int = 3, domain: str | None = None
-    ) -> FewShotsResponse:
-        return await _respond(
-            FewShotsResponse, service.get_few_shots(question, k, domain)
-        )
+    @tool(ListTablesResponse)
+    def list_tables():
+        return service.list_tables()
 
-    @tool("explain_query")
-    async def explain_query(sql: str) -> ExplainResponse:
-        return await _respond(ExplainResponse, service.explain_query(sql))
+    @tool(GetSchemaResponse)
+    def get_schema(tables: list[str]):
+        return service.get_schema(tables)
 
-    @tool("run_select_query")
-    async def run_select_query(sql: str, max_rows: int | None = None) -> SelectResponse:
-        return await _respond(SelectResponse, service.run_select_query(sql, max_rows))
+    @tool(SearchSchemaResponse)
+    def search_schema(question: str, k: int = 5, domain: str | None = None):
+        return service.search_schema(question, k, domain)
+
+    @tool(FewShotsResponse)
+    def get_few_shots(question: str, k: int = 3, domain: str | None = None):
+        return service.get_few_shots(question, k, domain)
+
+    @tool(ExplainResponse)
+    def explain_query(sql: str):
+        return service.explain_query(sql)
+
+    @tool(SelectResponse)
+    def run_select_query(sql: str, max_rows: int | None = None):
+        return service.run_select_query(sql, max_rows)
 
     @server.custom_route("/health", methods=["GET"])
     async def health(request: Request) -> JSONResponse:
@@ -239,6 +279,9 @@ def create_app(service: DbToolService, token: str) -> ASGIApp:
 
 
 def main() -> None:
+    observability = get_observability_settings()
+    configure_logging(observability.LOG_LEVEL)
+    configure_tracing(observability)
     cfg = get_db_mcp_settings()
     token = cfg.DB_MCP_TOKEN.get_secret_value()
     if not token and not is_loopback(cfg.DB_MCP_HOST):

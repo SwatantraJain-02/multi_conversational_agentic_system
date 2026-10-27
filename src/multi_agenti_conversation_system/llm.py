@@ -22,6 +22,7 @@ from multi_agenti_conversation_system.config import (
     get_chat_settings,
     get_embedding_settings,
 )
+from multi_agenti_conversation_system.observability import span
 
 logger = logging.getLogger(__name__)
 
@@ -94,18 +95,20 @@ class PrefixedEmbeddings(Embeddings):
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         prefixed = [self.doc_prefix + t for t in texts]
-        return with_retries(
-            lambda: self.inner.embed_documents(prefixed),
-            self.retries,
-            "embed_documents",
-        )
+        with span("embeddings.embed", {"kind": "documents", "count": len(texts)}):
+            return with_retries(
+                lambda: self.inner.embed_documents(prefixed),
+                self.retries,
+                "embed_documents",
+            )
 
     def embed_query(self, text: str) -> list[float]:
-        return with_retries(
-            lambda: self.inner.embed_query(self.query_prefix + text),
-            self.retries,
-            "embed_query",
-        )
+        with span("embeddings.embed", {"kind": "query", "count": 1}):
+            return with_retries(
+                lambda: self.inner.embed_query(self.query_prefix + text),
+                self.retries,
+                "embed_query",
+            )
 
 
 def build_embeddings(cfg: EmbeddingSettings) -> PrefixedEmbeddings:

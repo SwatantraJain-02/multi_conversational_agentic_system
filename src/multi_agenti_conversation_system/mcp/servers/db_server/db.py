@@ -13,6 +13,8 @@ from uuid import UUID
 import psycopg
 from psycopg_pool import ConnectionPool, PoolTimeout
 
+from multi_agenti_conversation_system.observability import span
+
 
 class QueryError(Exception):
     """A database failure with a short message that is safe to show to the agent."""
@@ -102,9 +104,11 @@ class NorthwindReader:
                 raise QueryError("The statement did not return rows")
             return [col.name for col in cur.description], cur.fetchmany(max_rows + 1)
 
-        columns, fetched = self._run(sql, fetch)
-        truncated = len(fetched) > max_rows
-        rows = [[to_jsonable(v) for v in row] for row in fetched[:max_rows]]
+        with span("db.fetch_rows", {"db.system": "postgresql"}) as s:
+            columns, fetched = self._run(sql, fetch)
+            truncated = len(fetched) > max_rows
+            rows = [[to_jsonable(v) for v in row] for row in fetched[:max_rows]]
+            s.set_attributes({"row_count": len(rows), "truncated": truncated})
         return {
             "columns": columns,
             "rows": rows,
@@ -121,8 +125,11 @@ class NorthwindReader:
                 raise QueryError("EXPLAIN returned no plan")
             return row[0]  # psycopg already parsed the JSON into a list
 
-        plan = self._run("EXPLAIN (FORMAT JSON) " + sql, fetch)
-        return int(plan[0]["Plan"]["Plan Rows"])
+        with span("db.explain", {"db.system": "postgresql"}) as s:
+            plan = self._run("EXPLAIN (FORMAT JSON) " + sql, fetch)
+            estimated = int(plan[0]["Plan"]["Plan Rows"])
+            s.set_attribute("estimated_rows", estimated)
+        return estimated
 
     def ping(self, timeout_s: float) -> bool:
         try:

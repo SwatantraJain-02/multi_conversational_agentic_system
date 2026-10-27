@@ -16,6 +16,7 @@ from chromadb.errors import ChromaError
 from langchain_core.embeddings import Embeddings
 
 from multi_agenti_conversation_system.catalog import SchemaCatalog
+from multi_agenti_conversation_system.observability import span
 from multi_agenti_conversation_system.vectorstore import get_collection
 
 SCHEMA_COLLECTION = "schema_docs"
@@ -112,17 +113,20 @@ class SchemaIndex:
     def _search(
         self, collection_name: str, question: str, k: int, domain: str | None
     ) -> list[dict[str, Any]]:
+        attributes = {"collection": collection_name, "k": k, "domain": domain}
         try:
-            collection = self._collection(collection_name)
-            total = collection.count()
-            if total == 0:
-                return []
-            result = collection.query(
-                query_embeddings=[self._embeddings.embed_query(question)],
-                n_results=max(1, min(k, total)),
-                where={"domain": domain} if domain else None,
-                include=["documents", "metadatas", "distances"],
-            )
+            with span("index.search", attributes) as s:
+                collection = self._collection(collection_name)
+                total = collection.count()
+                if total == 0:
+                    return []
+                result = collection.query(
+                    query_embeddings=[self._embeddings.embed_query(question)],
+                    n_results=max(1, min(k, total)),
+                    where={"domain": domain} if domain else None,
+                    include=["documents", "metadatas", "distances"],
+                )
+                s.set_attribute("hits", len(result["ids"][0]))
         except BACKEND_ERRORS as exc:
             raise SearchUnavailable(type(exc).__name__) from exc
         return [
