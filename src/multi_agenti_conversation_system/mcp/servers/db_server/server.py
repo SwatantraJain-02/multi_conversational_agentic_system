@@ -115,9 +115,12 @@ async def get_schema(tables: list[str]) -> dict[str, Any]:
 async def search_schema(
     question: str, k: int = 5, domain: str | None = None
 ) -> dict[str, Any]:
-    """Find the tables most relevant to a natural-language question (semantic search).
+    """Find the tables most relevant to a natural-language question.
 
-    Joins usually need more than one table, so keep k at 4 or more.
+    Hybrid search: semantic similarity plus keyword (BM25) matching, so exact column names
+    like "unit_price" are found too. Joins usually need more than one table, so keep k at
+    4 or more. degraded=true means semantic search was unavailable and only keyword
+    matching was used.
 
     Args:
         question: The user's question in plain English.
@@ -126,11 +129,9 @@ async def search_schema(
     """
     if problem := _check_search_args(question, k, domain):
         return _error(problem)
-    try:
-        hits = await _in_thread(schema_index.search_schema, question, k, domain)
-    except (ValueError, ConnectionError) as exc:  # Chroma down / Ollama down
-        return _error(f"Schema search is unavailable: {type(exc).__name__}")
-    return {"ok": True, "tables": hits}
+    # A Chroma/Ollama outage doesn't fail the tool: BM25 answers alone (degraded).
+    hits, degraded = await _in_thread(schema_index.search_schema, question, k, domain)
+    return {"ok": True, "tables": hits, "degraded": degraded}
 
 
 @server.tool()
@@ -139,7 +140,8 @@ async def get_few_shots(
 ) -> dict[str, Any]:
     """Find solved example questions with their SQL that resemble the given question.
 
-    Use them as a style and join guide when writing a new query.
+    Use them as a style and join guide when writing a new query. Hybrid search over the
+    question (semantic) and question + SQL (keyword); degraded=true means keyword only.
 
     Args:
         question: The user's question in plain English.
@@ -148,11 +150,10 @@ async def get_few_shots(
     """
     if problem := _check_search_args(question, k, domain):
         return _error(problem)
-    try:
-        hits = await _in_thread(schema_index.search_few_shots, question, k, domain)
-    except (ValueError, ConnectionError) as exc:
-        return _error(f"Example search is unavailable: {type(exc).__name__}")
-    return {"ok": True, "examples": hits}
+    hits, degraded = await _in_thread(
+        schema_index.search_few_shots, question, k, domain
+    )
+    return {"ok": True, "examples": hits, "degraded": degraded}
 
 
 @server.tool()

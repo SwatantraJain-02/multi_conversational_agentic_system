@@ -15,6 +15,13 @@ EXPECTED = {
     schema_index.FEW_SHOT_COLLECTION: len(catalog.few_shots()),
 }
 
+# Dense-friendly (paraphrase), keyword-friendly (exact column names), and mixed.
+SAMPLE_QUESTIONS = [
+    "How much revenue did we make per country?",
+    "freight cost per shipper",
+    "average unit_price by category",
+]
+
 
 def main() -> None:
     counts = schema_index.build_index()
@@ -24,14 +31,27 @@ def main() -> None:
         )
         print(f"{name}: {count} documents  {status}")
 
-    print("\nSample searches:")
-    question = "How much revenue did we make per country?"
-    print(f"  schema_docs for {question!r}:")
-    for hit in schema_index.search_schema(question, k=3):
-        print(f"    {hit['similarity']:.3f}  {hit['table']}  [{hit['domain']}]")
-    print(f"  sql_seed_examples for {question!r}:")
-    for hit in schema_index.search_few_shots(question, k=3):
-        print(f"    {hit['similarity']:.3f}  {hit['question']}")
+    for question in SAMPLE_QUESTIONS:
+        print(f"\n{question!r}")
+        hits, degraded = schema_index.search_schema(question, k=4)
+        _print_hits("schema_docs", hits, degraded, "table")
+        hits, degraded = schema_index.search_few_shots(question, k=3)
+        _print_hits("sql_seed_examples", hits, degraded, "question")
+
+
+def _rank(value) -> str:
+    return "-" if value is None else str(value)
+
+
+def _print_hits(name: str, hits, degraded: bool, label: str) -> None:
+    print(f"  {name}{'  (DEGRADED: BM25 only)' if degraded else ''}")
+    print("    rrf  rrf_score  similarity  dense  bm25")
+    for rank, hit in enumerate(hits, start=1):
+        similarity = "-" if hit["similarity"] is None else f"{hit['similarity']:.3f}"
+        print(
+            f"    {rank:>3}  {hit['rrf_score']:.5f}  {similarity:>10}"
+            f"  {_rank(hit['dense_rank']):>5}  {_rank(hit['bm25_rank']):>4}  {hit[label]}"
+        )
 
 
 if __name__ == "__main__":

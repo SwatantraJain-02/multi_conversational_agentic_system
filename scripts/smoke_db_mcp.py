@@ -75,6 +75,14 @@ async def run_checks(session: ClientSession) -> None:
         "search_schema finds customers",
         data["ok"] and "customers" in [t["table"] for t in data["tables"]],
     )
+    check(
+        "search_schema is hybrid (rrf_score, dense_rank, bm25_rank; not degraded)",
+        data["degraded"] is False
+        and all(
+            {"rrf_score", "dense_rank", "bm25_rank", "similarity"} <= set(t)
+            for t in data["tables"]
+        ),
+    )
     data = await call(session, "search_schema", question="x", domain="bogus")
     check("search_schema rejects an unknown domain", not data["ok"])
 
