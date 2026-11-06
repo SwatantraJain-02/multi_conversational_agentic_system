@@ -36,8 +36,9 @@
 | 1 Data layer | **Done** (on the old stack: compose Postgres + Chroma). Re-done in Phase A on Aiven + Pinecone |
 | 2 DB MCP server | **Done.** Streamable HTTP + bearer token, validator, smoke script, integration tests |
 | 2b Hybrid retrieval | **Done** (commit `171006a`). Dense + BM25 → RRF, degraded mode. BM25 moved into Pinecone in Phase A |
-| A Cloud migration | **Gate passed (6 Nov), awaiting review.** Aiven set up, Pinecone document index (4096-dim), smoke + integration tests green |
-| B–L | Not started |
+| A Cloud migration | **Done** (commit `f9de2a2`). Aiven set up, Pinecone document index (4096-dim), smoke + integration tests green |
+| B Web MCP server | **Done (6 Nov).** `search_web` + `fetch_page` with SSRF guard and rate limits; smoke + 37 unit tests green; both MCP servers run with bearer auth ON |
+| C–L | Not started |
 
 ---
 
@@ -279,6 +280,20 @@ None of these is a CS3 minimum demo.
     - extracts with trafilatura, falling back to Tavily Extract under 200 chars.
   - Rate limits per tool: search 10/min with a burst of 5, fetch 30/min. When exhausted it returns `{ok:false, error:"rate_limited", retry_after_s}`.
 - **Gate:** `smoke_web_mcp.py` shows a search, a fetch, a blocked `127.0.0.1`, a blocked redirect to a private IP, and a tripped rate limit.
+- **Gate results (6 Nov):**
+  - **`smoke_web_mcp.py`: ALL CHECKS PASSED.**
+    - Searches return real URLs; `recency` + `topic=news` work.
+    - A search result fetched through trafilatura (3,000 chars, truncated).
+    - Blocked: `127.0.0.1:5555`, `169.254.169.254`, `localhost`, `127.0.0.1.nip.io` (a public DNS name for loopback), and `file://`.
+    - A burst of 15 fetches → 10 `rate_limited`, with `retry_after_s`.
+  - **The redirect-to-private-IP check is proven in the unit tests** (`tests/unit/test_web_fetch.py`, mock transport). Public redirectors such as httpbin refuse to redirect to loopback themselves (HTTP 403), so they can't demonstrate it live.
+  - `BearerAuth` and the loopback check moved to `mcp/common.py`, and the DB smoke still passes (401 checks included). Unit tests: 134 passed.
+  - **Auth decision:** static bearer tokens (`DB_MCP_TOKEN`, `WEB_MCP_TOKEN`, 32-byte random) on every service, A2A agents included. Re-verified with auth on: both servers answer 401 without a token, DB smoke + Web smoke + 8 integration tests pass. Not OAuth 2.1: every caller is one trusted internal service, so there is no per-user identity. State this as a limitation in the report.
+- **Files:**
+  - `mcp/common.py`;
+  - `mcp/servers/web_server/{server,fetch,tavily_client,rate_limit}.py`;
+  - `scripts/smoke_web_mcp.py`, `tests/unit/test_web_fetch.py`;
+  - `WEB_MCP_*` and `WEB_*_PER_MIN/BURST` settings.
 
 ### Phase C — Foundations: MCP client, Langfuse, A2A plumbing (8 Nov) [Must]
 - **Learn:** A2A agent cards, tasks, task states and parts; Langfuse prompts, labels and versions; trace context propagation.

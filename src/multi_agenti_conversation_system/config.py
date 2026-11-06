@@ -71,9 +71,17 @@ class Settings(BaseSettings):
     DB_MCP_TOKEN: str
 
     # ---------------------------
-    # Web search
+    # Web search (Web MCP server)
     # ---------------------------
     TAVILY_API_KEY: str = ""
+    WEB_MCP_HOST: str = "localhost"
+    WEB_MCP_PORT: int = 5556
+    WEB_MCP_TOKEN: str = ""
+    # Token buckets per tool: sustained rate per minute and burst size.
+    WEB_SEARCH_PER_MIN: int = 10
+    WEB_SEARCH_BURST: int = 5
+    WEB_FETCH_PER_MIN: int = 30
+    WEB_FETCH_BURST: int = 10
 
     def _conninfo(self, dbname: str, user: str, password: str) -> str:
         return make_conninfo(

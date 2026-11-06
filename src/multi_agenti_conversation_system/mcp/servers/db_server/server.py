@@ -8,8 +8,6 @@ exception), so the calling agent can read the message and correct itself.
 """
 
 import asyncio
-import ipaddress
-import secrets
 from typing import Any
 
 import uvicorn
@@ -22,6 +20,10 @@ from multi_agenti_conversation_system.config import settings
 from multi_agenti_conversation_system.guardrails.sql_validator import (
     find_pii_columns,
     validate_select,
+)
+from multi_agenti_conversation_system.mcp.common import (
+    BearerAuth,
+    require_token_off_loopback,
 )
 from multi_agenti_conversation_system.mcp.servers.db_server import (
     catalog,
@@ -234,40 +236,13 @@ async def health(request: Request) -> JSONResponse:
 
 
 # ------------------------------------------------------------------------ HTTP layer
-class BearerAuth:
-    """Pure ASGI middleware: rejects requests without the right token (except /health)."""
-
-    def __init__(self, app, token: str):
-        self.app, self.token = app, token
-
-    async def __call__(self, scope, receive, send):
-        if self.token and scope["type"] == "http" and scope["path"] != "/health":
-            got = dict(scope["headers"]).get(b"authorization", b"").decode()
-            if not secrets.compare_digest(got, f"Bearer {self.token}"):
-                await JSONResponse({"error": "unauthorized"}, status_code=401)(
-                    scope, receive, send
-                )
-                return
-        await self.app(scope, receive, send)
-
-
-def _is_loopback(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 app = BearerAuth(server.streamable_http_app(), token=settings.DB_MCP_TOKEN)
 
 
 def main() -> None:
-    if not settings.DB_MCP_TOKEN and not _is_loopback(settings.DB_MCP_HOST):
-        raise SystemExit(
-            "Refusing to listen on a non-local address without DB_MCP_TOKEN set."
-        )
+    require_token_off_loopback(
+        settings.DB_MCP_TOKEN, settings.DB_MCP_HOST, "DB_MCP_TOKEN"
+    )
     try:
         uvicorn.run(app, host=settings.DB_MCP_HOST, port=settings.DB_MCP_PORT)
     finally:
