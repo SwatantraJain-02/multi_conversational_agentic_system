@@ -16,31 +16,52 @@ class Settings(BaseSettings):
     )
 
     # ---------------------------
-    # Database configuration
+    # Database configuration (Aiven Postgres: one service, two databases)
     # ---------------------------
-    POSTGRES_ADMIN_PASSWORD: str
-    AGENT_APP_PASSWORD: str
-    AGENT_READONLY_PASSWORD: str
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
+    POSTGRES_SSLMODE: str = "require"
+    POSTGRES_ADMIN_USER: str = "avnadmin"
+    POSTGRES_ADMIN_PASSWORD: str
+    POSTGRES_ADMIN_DB: str = "defaultdb"
+    AGENT_APP_PASSWORD: str
+    AGENT_READONLY_PASSWORD: str
     NORTHWIND_DB: str = "northwind"
+    MEMORY_DB: str = "agent_memory"
     MAX_ROWS: int = 100
 
     # ---------------------------
-    # Vector database configuration
+    # Vector database configuration (Pinecone serverless)
     # ---------------------------
-    CHROMADB_HOST: str = "localhost"
-    CHROMADB_PORT: int = 5430
+    PINECONE_API_KEY: str = ""
+    PINECONE_INDEX: str = "capstone"
+    PINECONE_CLOUD: str = "aws"
+    PINECONE_REGION: str = "us-east-1"
 
     # ---------------------------
-    # LLM / model configuration
+    # LLM / model configuration (OpenRouter)
     # ---------------------------
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
     OPENROUTER_API_KEY: str
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     CHAT_MODEL: str
-    EMBED_MODEL: str = "nomic-embed-text"
+    JUDGE_MODEL: str = ""
+    EMBED_MODEL: str = "nvidia/nemotron-3.5-embed-8b:free"
+    # Nemotron embed models are trained with these prefixes (check against the model card).
+    EMBED_QUERY_PREFIX: str = "query: "
+    EMBED_DOC_PREFIX: str = "passage: "
+    # The free Nemotron endpoint fails ("service inference failed") on batches of real
+    # documents, so send one text per request by default (G18).
+    EMBED_BATCH_SIZE: int = 1
     TEMPERATURE: float = 0.0
     MODEL_REASONING: bool = False
+
+    # ---------------------------
+    # Langfuse (prompts, traces, evals)
+    # ---------------------------
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_BASE_URL: str = "https://cloud.langfuse.com"
+    PROMPT_LABEL: str = "production"
 
     # ---------------------------
     # MCP configuration
@@ -49,14 +70,36 @@ class Settings(BaseSettings):
     DB_MCP_PORT: int = 5555
     DB_MCP_TOKEN: str
 
-    @property
-    def northwind_conninfo(self) -> str:
+    # ---------------------------
+    # Web search
+    # ---------------------------
+    TAVILY_API_KEY: str = ""
+
+    def _conninfo(self, dbname: str, user: str, password: str) -> str:
         return make_conninfo(
             host=self.POSTGRES_HOST,
             port=self.POSTGRES_PORT,
-            dbname=self.NORTHWIND_DB,
-            user="agent_readonly",
-            password=self.AGENT_READONLY_PASSWORD,
+            dbname=dbname,
+            user=user,
+            password=password,
+            sslmode=self.POSTGRES_SSLMODE,
+        )
+
+    @property
+    def northwind_conninfo(self) -> str:
+        return self._conninfo(
+            self.NORTHWIND_DB, "agent_readonly", self.AGENT_READONLY_PASSWORD
+        )
+
+    @property
+    def memory_conninfo(self) -> str:
+        return self._conninfo(self.MEMORY_DB, "agent_app", self.AGENT_APP_PASSWORD)
+
+    def admin_conninfo(self, dbname: str | None = None) -> str:
+        return self._conninfo(
+            dbname or self.POSTGRES_ADMIN_DB,
+            self.POSTGRES_ADMIN_USER,
+            self.POSTGRES_ADMIN_PASSWORD,
         )
 
 

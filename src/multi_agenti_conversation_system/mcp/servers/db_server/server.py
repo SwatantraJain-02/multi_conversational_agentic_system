@@ -69,7 +69,7 @@ def _check_search_args(question: str, k: int, domain: str | None) -> str | None:
 
 
 async def _in_thread(fn, *args):
-    """Run blocking code (psycopg, Chroma, Ollama) off the event loop."""
+    """Run blocking code (psycopg, Pinecone, the embedding API) off the event loop."""
     return await asyncio.to_thread(fn, *args)
 
 
@@ -129,8 +129,14 @@ async def search_schema(
     """
     if problem := _check_search_args(question, k, domain):
         return _error(problem)
-    # A Chroma/Ollama outage doesn't fail the tool: BM25 answers alone (degraded).
-    hits, degraded = await _in_thread(schema_index.search_schema, question, k, domain)
+    # An embedding-API outage doesn't fail the tool: BM25 answers alone (degraded).
+    # Pinecone itself being down does: both branches live there.
+    try:
+        hits, degraded = await _in_thread(
+            schema_index.search_schema, question, k, domain
+        )
+    except Exception as exc:  # noqa: BLE001 - tools report errors, never raise
+        return _error(f"schema search unavailable: {type(exc).__name__}")
     return {"ok": True, "tables": hits, "degraded": degraded}
 
 
@@ -150,9 +156,12 @@ async def get_few_shots(
     """
     if problem := _check_search_args(question, k, domain):
         return _error(problem)
-    hits, degraded = await _in_thread(
-        schema_index.search_few_shots, question, k, domain
-    )
+    try:
+        hits, degraded = await _in_thread(
+            schema_index.search_few_shots, question, k, domain
+        )
+    except Exception as exc:  # noqa: BLE001 - tools report errors, never raise
+        return _error(f"few-shot search unavailable: {type(exc).__name__}")
     return {"ok": True, "examples": hits, "degraded": degraded}
 
 

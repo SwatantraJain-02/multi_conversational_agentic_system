@@ -1,10 +1,10 @@
 import pytest
 
 from multi_agenti_conversation_system.retrieval.hybrid import (
-    BM25Index,
     DenseHit,
     candidate_depth,
     hybrid_search,
+    keyword_query,
     rrf,
     tokenize,
 )
@@ -69,72 +69,15 @@ def test_rrf_weights():
         rrf([["a"], ["b"]], weights=[1.0])
 
 
-# ------------------------------------------------------------------------ BM25
-@pytest.fixture
-def index():
-    return BM25Index(
-        ids=["orders", "order_details", "shippers", "employees"],
-        documents=[
-            "Table: orders. Columns: order_id, customer_id, freight, ship_via",
-            "Table: order_details. Columns: order_id, product_id, unit_price, quantity",
-            "Table: shippers. Columns: shipper_id, company_name, phone",
-            "Table: employees. Columns: employee_id, last_name, region",
-        ],
-        metadatas=[
-            {"domain": "sales"},
-            {"domain": "sales"},
-            {"domain": "logistics"},
-            {"domain": "hr"},
-        ],
+# --------------------------------------------------------------- keyword_query
+def test_keyword_query_joins_tokens_for_the_bm25_field():
+    assert keyword_query("Average unit_price by category") == (
+        "average unit_price unit price category"
     )
 
 
-def test_bm25_finds_exact_identifier(index):
-    assert index.search("unit_price", k=3)[0][0] == "order_details"
-
-
-def test_bm25_drops_non_matches(index):
-    hits = index.search("freight", k=4)
-    assert [d for d, _ in hits] == ["orders"]
-    assert all(score > 0 for _, score in hits)
-    assert index.search("zebra", k=4) == []
-    assert index.search("what is the", k=4) == []
-
-
-def test_bm25_domain_filter_applies_after_scoring(index):
-    hits = index.search("order_id", k=4, where={"domain": "sales"})
-    assert {d for d, _ in hits} == {"orders", "order_details"}
-    assert index.search("shipper", k=4, where={"domain": "sales"}) == []
-    assert index.count({"domain": "sales"}) == 2
-    assert index.count() == 4
-
-
-def test_bm25_two_doc_corpus_still_returns_keyword_hits():
-    # "order" is in both docs: BM25Okapi's IDF would be <= 0 here (G11); Lucene's stays > 0.
-    tiny = BM25Index(
-        ids=["a", "b"],
-        documents=["orders freight", "orders unit_price"],
-        metadatas=[{}, {}],
-    )
-    assert {d for d, _ in tiny.search("orders", k=2)} == {"a", "b"}
-    assert tiny.search("freight", k=2)[0][0] == "a"
-
-
-def test_bm25_filter_leaving_two_docs_still_returns_keyword_hits(index):
-    # Both sales docs contain "order_id"; scored over the full corpus, the IDF stays > 0.
-    hits = index.search("order", k=4, where={"domain": "sales"})
-    assert len(hits) == 2
-
-
-def test_bm25_empty_corpus():
-    empty = BM25Index(ids=[], documents=[], metadatas=[])
-    assert empty.search("anything", k=3) == []
-    assert empty.count() == 0
-
-
-def test_bm25_rejects_mismatched_lengths():
-    with pytest.raises(ValueError):
-        BM25Index(ids=["a"], documents=[], metadatas=[])
+def test_keyword_query_of_only_stopwords_is_empty():
+    assert keyword_query("what is the") == ""
 
 
 # ----------------------------------------------------------------- hybrid_search
@@ -175,12 +118,20 @@ def test_hybrid_keeps_top_k_and_passes_depth():
 
 def test_hybrid_degrades_when_dense_fails():
     def broken(n):
-        raise ConnectionError("chroma is down")
+        raise ConnectionError("embedding API is down")
 
     result = hybrid_search(broken, _keyword([("x", 2.0), ("y", 1.0)]), k=5, depth=10)
     assert result.degraded
     assert [h.id for h in result.hits] == ["x", "y"]
     assert all(h.similarity is None and h.dense_rank is None for h in result.hits)
+
+
+def test_hybrid_keyword_failure_propagates():
+    def broken(n):
+        raise ConnectionError("vector store is down")
+
+    with pytest.raises(ConnectionError):
+        hybrid_search(lambda n: [DenseHit("a", 0.9)], broken, k=5, depth=10)
 
 
 def test_hybrid_degraded_when_dense_index_empty():

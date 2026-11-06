@@ -1,8 +1,11 @@
 """Hybrid retrieval: dense (semantic) + BM25 (keyword) rankings fused with RRF.
 
-Pure code, no Chroma, no catalog: the caller supplies the corpus and the two search
-functions. Used by the DB MCP server for schema docs and few-shots, and reused agent-side
-for learned SQL pairs.
+Pure code, no vector store, no catalog: the caller supplies the two search functions
+(both run in Pinecone, see vectorstore.py). Used by the DB MCP server for schema docs and
+few-shots, and reused agent-side for learned SQL pairs.
+
+`tokenize` prepares the text for Pinecone's BM25 field, both when indexing and when
+querying, so identifiers match in all their forms (`unit_price`, `unit`, `price`).
 
 Why both: dense search handles paraphrases ("money we made" ~ "revenue") but blurs exact
 terms; BM25 nails identifiers and rare words ("unit_price", "freight") but misses synonyms.
@@ -14,10 +17,8 @@ import logging
 import math
 import re
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any
-
-import bm25s
 
 logger = logging.getLogger(__name__)
 
@@ -66,51 +67,9 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
-def _matches(metadata: dict[str, Any], where: dict[str, Any] | None) -> bool:
-    return not where or all(metadata.get(key) == value for key, value in where.items())
-
-
-class BM25Index:
-    """In-memory BM25 over a small corpus, with Lucene IDF (never negative, G11).
-
-    Always scores against the *full* corpus and filters by metadata afterwards, so a
-    domain filter that leaves 2 docs doesn't shrink the IDF statistics to nothing.
-    """
-
-    def __init__(
-        self,
-        ids: Sequence[str],
-        documents: Sequence[str],
-        metadatas: Sequence[dict[str, Any]],
-    ):
-        if not len(ids) == len(documents) == len(metadatas):
-            raise ValueError("ids, documents and metadatas must have the same length")
-        self.ids = list(ids)
-        self.metadatas = list(metadatas)
-        self._bm25: bm25s.BM25 | None = None
-        if self.ids:
-            self._bm25 = bm25s.BM25(method="lucene")
-            self._bm25.index([tokenize(d) for d in documents], show_progress=False)
-
-    def count(self, where: dict[str, Any] | None = None) -> int:
-        """How many docs pass the metadata filter."""
-        return sum(_matches(m, where) for m in self.metadatas)
-
-    def search(
-        self, query: str, k: int, where: dict[str, Any] | None = None
-    ) -> list[tuple[str, float]]:
-        """Top-k (id, score) pairs, best first. Docs that don't match any term are dropped."""
-        tokens = tokenize(query)
-        if self._bm25 is None or not tokens:
-            return []
-        scores = self._bm25.get_scores(tokens)
-        hits = [
-            (doc_id, float(score))
-            for doc_id, score, meta in zip(self.ids, scores, self.metadatas)
-            if score > 0 and _matches(meta, where)
-        ]
-        hits.sort(key=lambda hit: -hit[1])
-        return hits[:k]
+def keyword_query(text: str) -> str:
+    """The text as it goes into (and is searched in) the BM25 field."""
+    return " ".join(tokenize(text))
 
 
 def rrf(
@@ -168,26 +127,29 @@ def hybrid_search(
     k: int,
     depth: int,
 ) -> HybridResult:
-    """Run both branches at `depth`, fuse with RRF, keep the top k.
+    """Run both branches in parallel at `depth`, fuse with RRF, keep the top k.
 
-    The dense branch is guarded: if Chroma or Ollama fails (or the collection is empty,
+    The dense branch is guarded: if the embedding API fails (or the namespace is empty,
     i.e. never built), the result comes from BM25 alone with degraded=True instead of an
-    error. BM25 runs in-process and can't fail that way. depth=0 (the filter matches
-    nothing) is a plain empty result, not an outage.
+    error. The keyword branch is not guarded: if it fails, the store itself is down and
+    the error propagates. depth=0 (the filter matches nothing) is a plain empty result,
+    not an outage.
     """
     if depth <= 0:
         return HybridResult(hits=[], degraded=False)
-    try:
-        dense = dense_fn(depth)
-        degraded = not dense
-        if degraded:
-            logger.warning("dense search returned nothing; is the index built?")
-    except Exception as exc:  # noqa: BLE001 - failing soft is the point
-        logger.warning(
-            "dense search failed, using BM25 only: %s: %s", type(exc).__name__, exc
-        )
-        dense, degraded = [], True
-    keyword = keyword_fn(depth)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        dense_future = pool.submit(dense_fn, depth)
+        keyword = pool.submit(keyword_fn, depth).result()
+        try:
+            dense = dense_future.result()
+            degraded = not dense
+            if degraded:
+                logger.warning("dense search returned nothing; is the index built?")
+        except Exception as exc:  # noqa: BLE001 - failing soft is the point
+            logger.warning(
+                "dense search failed, using BM25 only: %s: %s", type(exc).__name__, exc
+            )
+            dense, degraded = [], True
 
     similarity = {hit.id: hit.similarity for hit in dense}
     dense_rank = {hit.id: rank for rank, hit in enumerate(dense, start=1)}

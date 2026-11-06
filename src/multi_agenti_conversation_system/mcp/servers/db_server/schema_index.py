@@ -1,38 +1,34 @@
 """Hybrid index over the schema docs and the seed question -> SQL examples.
 
-Two branches, fused with RRF (see retrieval/hybrid.py):
-- dense: Chroma collections `schema_docs` / `sql_seed_examples`, built offline by
-  `build_index()` (scripts/build_schema_index.py);
-- keyword: in-process BM25 built from the catalog YAML, never from Chroma, so keyword
-  search keeps working when Chroma or Ollama is down (the result is then `degraded`).
+Both branches run in Pinecone (see vectorstore.py) and are fused with RRF
+(retrieval/hybrid.py):
+- keyword: BM25 over the `keywords` field (our tokenizer's output);
+- dense: cosine similarity on the `embedding` field.
+
+The namespaces `schema_docs` / `sql_seed_examples` are built offline by `build_index()`
+(scripts/build_schema_index.py). The catalog YAML stays the source of truth: hit metadata
+and the candidate depth come from it, so search results never depend on stale index
+metadata. If the embedding API is down, the keyword branch answers alone (`degraded`).
 
 The search functions are what the MCP tools `search_schema` and `get_few_shots` call.
 """
 
 import hashlib
+from dataclasses import dataclass
 from functools import cache
 from typing import Any
 
-from chromadb import Collection
-
+from multi_agenti_conversation_system import vectorstore
 from multi_agenti_conversation_system.llm import get_embedding_model
 from multi_agenti_conversation_system.mcp.servers.db_server import catalog
 from multi_agenti_conversation_system.retrieval.hybrid import (
-    BM25Index,
     DenseHit,
     HybridResult,
     candidate_depth,
     hybrid_search,
+    keyword_query,
 )
-from multi_agenti_conversation_system.vectorstore import get_collection
-
-SCHEMA_COLLECTION = "schema_docs"
-FEW_SHOT_COLLECTION = "sql_seed_examples"
-
-# nomic-embed-text is trained with these task prefixes; retrieval is noticeably better with them.
-# The stored document text stays clean, the prefix is added only when embedding.
-DOC_PREFIX = "search_document: "
-QUERY_PREFIX = "search_query: "
+from multi_agenti_conversation_system.vectorstore import SCHEMA_DOCS, SQL_SEED_EXAMPLES
 
 
 def _few_shot_id(question: str) -> str:
@@ -60,95 +56,120 @@ def _few_shot_metadata(example: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _upsert(collection: Collection, ids, documents, metadatas) -> None:
-    vectors = get_embedding_model().embed_documents([DOC_PREFIX + d for d in documents])
-    collection.upsert(
-        ids=ids, documents=documents, metadatas=metadatas, embeddings=vectors
-    )
-    # Remove entries whose table/question no longer exists in the YAML files.
-    stale = set(collection.get(include=[])["ids"]) - set(ids)
-    if stale:
-        collection.delete(ids=list(stale))
+@dataclass(frozen=True)
+class _Corpus:
+    """One namespace's documents as the YAML defines them."""
+
+    ids: list[str]
+    dense_texts: list[str]  # what gets embedded
+    keyword_texts: list[str]  # what gets BM25-indexed
+    metadatas: list[dict[str, Any]]
+
+    def count(self, domain: str | None) -> int:
+        return sum(domain is None or m["domain"] == domain for m in self.metadatas)
+
+    def metadata(self) -> dict[str, dict[str, Any]]:
+        return dict(zip(self.ids, self.metadatas))
 
 
-def build_index() -> dict[str, int]:
-    """(Re)build both collections from data/*.yaml and return their sizes."""
-    tables = list(catalog.schema_tables())
-    schema = get_collection(SCHEMA_COLLECTION)
-    _upsert(
-        schema,
-        ids=[_table_id(t) for t in tables],
-        documents=[catalog.table_document(t) for t in tables],
-        metadatas=[_table_metadata(t) for t in tables],
-    )
-
-    examples = catalog.few_shots()
-    few_shots = get_collection(FEW_SHOT_COLLECTION)
-    _upsert(
-        few_shots,
-        ids=[_few_shot_id(e["question"]) for e in examples],
-        # The question is what gets embedded; the SQL travels along as metadata.
-        documents=[e["question"] for e in examples],
-        metadatas=[_few_shot_metadata(e) for e in examples],
-    )
-    return {SCHEMA_COLLECTION: schema.count(), FEW_SHOT_COLLECTION: few_shots.count()}
-
-
-# ---------------------------------------------------------------- keyword corpora
 @cache
-def _schema_bm25() -> BM25Index:
+def _schema_corpus() -> _Corpus:
     tables = list(catalog.schema_tables())
-    return BM25Index(
+    documents = [catalog.table_document(t) for t in tables]
+    return _Corpus(
         ids=[_table_id(t) for t in tables],
-        documents=[catalog.table_document(t) for t in tables],
+        dense_texts=documents,
+        keyword_texts=documents,
         metadatas=[_table_metadata(t) for t in tables],
     )
 
 
 @cache
-def _few_shot_bm25() -> BM25Index:
+def _few_shot_corpus() -> _Corpus:
     examples = catalog.few_shots()
-    return BM25Index(
+    return _Corpus(
         ids=[_few_shot_id(e["question"]) for e in examples],
-        # Question + SQL, so "freight" or "unit_price" also match through the SQL.
-        documents=[f"{e['question']}\n{e['sql']}" for e in examples],
+        # Dense embeds the question; BM25 indexes question + SQL, so "freight" or
+        # "unit_price" also match through the SQL.
+        dense_texts=[e["question"] for e in examples],
+        keyword_texts=[f"{e['question']}\n{e['sql']}" for e in examples],
         metadatas=[
             {"question": e["question"], **_few_shot_metadata(e)} for e in examples
         ],
     )
 
 
-# ---------------------------------------------------------------------- search
-def _dense(
-    collection_name: str, question: str, n: int, where: dict[str, Any] | None
-) -> list[DenseHit]:
-    # The collection is fetched per call, so a Chroma outage at startup can't stop the server.
-    collection = get_collection(collection_name)
-    if n == 0 or collection.count() == 0:
-        return []
-    result = collection.query(
-        query_embeddings=[get_embedding_model().embed_query(QUERY_PREFIX + question)],
-        n_results=n,
-        where=where,
-        include=["distances"],
+# ----------------------------------------------------------------------- build
+def _upsert(namespace: str, corpus: _Corpus) -> None:
+    vectors = get_embedding_model().embed_documents(corpus.dense_texts)
+    vectorstore.upsert(
+        namespace,
+        [
+            {
+                "_id": doc_id,
+                vectorstore.KEYWORDS_FIELD: keyword_query(keyword_text),
+                vectorstore.EMBEDDING_FIELD: vector,
+                "text": dense_text,
+                **metadata,
+            }
+            for doc_id, dense_text, keyword_text, vector, metadata in zip(
+                corpus.ids,
+                corpus.dense_texts,
+                corpus.keyword_texts,
+                vectors,
+                corpus.metadatas,
+            )
+        ],
     )
-    return [
-        DenseHit(id=doc_id, similarity=round(1 - dist, 4))
-        for doc_id, dist in zip(result["ids"][0], result["distances"][0])
-    ]
+    # Remove entries whose table/question no longer exists in the YAML files.
+    stale = set(vectorstore.list_ids(namespace)) - set(corpus.ids)
+    vectorstore.delete(namespace, sorted(stale))
+
+
+def build_index() -> dict[str, int]:
+    """(Re)build both namespaces from data/*.yaml and return how many entries each got."""
+    sizes = {}
+    for namespace, corpus in (
+        (SCHEMA_DOCS, _schema_corpus()),
+        (SQL_SEED_EXAMPLES, _few_shot_corpus()),
+    ):
+        _upsert(namespace, corpus)
+        # Counted from the YAML: a fresh upsert isn't instantly searchable (G14).
+        sizes[namespace] = len(corpus.ids)
+    return sizes
+
+
+# ---------------------------------------------------------------------- search
+def _dense(namespace: str, question: str, n: int, domain: str | None) -> list[DenseHit]:
+    matches = vectorstore.dense_search(
+        namespace,
+        get_embedding_model().embed_query(question),
+        top_k=n,
+        filter=vectorstore.eq_filter(domain=domain),
+    )
+    return [DenseHit(id=m.id, similarity=round(m.score, 4)) for m in matches]
+
+
+def _keyword(
+    namespace: str, question: str, n: int, domain: str | None
+) -> list[tuple[str, float]]:
+    matches = vectorstore.keyword_search(
+        namespace,
+        keyword_query(question),
+        top_k=n,
+        filter=vectorstore.eq_filter(domain=domain),
+    )
+    return [(m.id, m.score) for m in matches]
 
 
 def _hybrid(
-    collection_name: str, index: BM25Index, question: str, k: int, domain: str | None
+    namespace: str, corpus: _Corpus, question: str, k: int, domain: str | None
 ) -> HybridResult:
-    where = {"domain": domain} if domain else None
-    # Depth comes from the filtered catalog: collection.count() ignores the where filter.
-    depth = candidate_depth(index.count(where), k)
     return hybrid_search(
-        dense_fn=lambda n: _dense(collection_name, question, n, where),
-        keyword_fn=lambda n: index.search(question, n, where),
+        dense_fn=lambda n: _dense(namespace, question, n, domain),
+        keyword_fn=lambda n: _keyword(namespace, question, n, domain),
         k=k,
-        depth=depth,
+        depth=candidate_depth(corpus.count(domain), k),
     )
 
 
@@ -168,9 +189,9 @@ def search_schema(
 
     Hits: [{table, domain, has_pii, document, similarity, rrf_score, dense_rank, bm25_rank}].
     """
-    index = _schema_bm25()
-    result = _hybrid(SCHEMA_COLLECTION, index, question, k, domain)
-    meta = dict(zip(index.ids, index.metadatas))
+    corpus = _schema_corpus()
+    result = _hybrid(SCHEMA_DOCS, corpus, question, k, domain)
+    meta = corpus.metadata()
     hits = [
         {
             **meta[hit.id],
@@ -178,6 +199,7 @@ def search_schema(
             **_ranking(hit),
         }
         for hit in result.hits
+        if hit.id in meta  # ignore ids the YAML no longer has (index not rebuilt yet)
     ]
     return hits, result.degraded
 
@@ -189,8 +211,8 @@ def search_few_shots(
 
     Hits: [{question, sql, domain, pii, similarity, rrf_score, dense_rank, bm25_rank}].
     """
-    index = _few_shot_bm25()
-    result = _hybrid(FEW_SHOT_COLLECTION, index, question, k, domain)
-    meta = dict(zip(index.ids, index.metadatas))
-    hits = [{**meta[hit.id], **_ranking(hit)} for hit in result.hits]
+    corpus = _few_shot_corpus()
+    result = _hybrid(SQL_SEED_EXAMPLES, corpus, question, k, domain)
+    meta = corpus.metadata()
+    hits = [{**meta[hit.id], **_ranking(hit)} for hit in result.hits if hit.id in meta]
     return hits, result.degraded

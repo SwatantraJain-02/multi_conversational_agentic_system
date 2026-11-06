@@ -1,7 +1,12 @@
-from langchain_ollama import OllamaEmbeddings
+from functools import cache
+
 from langchain_openrouter import ChatOpenRouter
 
 from multi_agenti_conversation_system.config import settings
+from multi_agenti_conversation_system.embeddings import (
+    PrefixedOpenAIEmbeddings,
+    build_embeddings,
+)
 
 
 def get_chat_model():
@@ -15,10 +20,7 @@ def get_chat_model():
     return llm
 
 
-def get_embedding_model():
-    embedder = OllamaEmbeddings(
-        base_url=settings.OLLAMA_BASE_URL,
-        model=settings.EMBED_MODEL,
-    )
-
-    return embedder
+@cache
+def get_embedding_model() -> PrefixedOpenAIEmbeddings:
+    # One instance per process, so the HTTP connection and the query cache are shared.
+    return build_embeddings()

@@ -2,18 +2,22 @@
 
     uv run python scripts/smoke_llm.py
 
-Checks: (a) tool calling, (b) structured output, (c) no <think> leakage, (d) embeddings.
+Checks: (a) tool calling, (b) structured output, (c) no <think> leakage, (d) embeddings,
+(e) query -> document retrieval with the model's prefixes. Then a small burst of embedding
+requests measures the rate limit (G18). Use --no-burst to skip it.
 The prompts are tiny dummies; no project data is sent to the chat model.
 """
 
 import math
 import sys
+import time
 from typing import Literal
 
 from langchain_core.tools import tool
 from pydantic import BaseModel
 
 from multi_agenti_conversation_system.config import settings
+from multi_agenti_conversation_system.embeddings import rate_limits
 from multi_agenti_conversation_system.llm import get_chat_model, get_embedding_model
 
 failures: list[str] = []
@@ -104,6 +108,29 @@ def check_embeddings() -> None:
         similar > different,
         f"similar={similar:.3f} unrelated={different:.3f} dims={len(a)}",
     )
+    # A query (query prefix) must land nearer its matching document (document prefix).
+    q = embedder.embed_query("Where is the cat?")
+    report(
+        "(e) query -> document retrieval",
+        cosine(q, a) > cosine(q, c),
+        f"match={cosine(q, a):.3f} other={cosine(q, c):.3f}",
+    )
+
+
+def measure_embedding_burst(n: int = 20) -> None:
+    """Send n distinct single-query requests back to back and report HTTP 429s."""
+    embedder = get_embedding_model()
+    before_responses, before_429 = rate_limits.responses, rate_limits.rate_limited
+    start = time.perf_counter()
+    for i in range(n):
+        embedder.embed_query(f"rate limit probe number {i} at {time.time()}")
+    elapsed = time.perf_counter() - start
+    limited = rate_limits.rate_limited - before_429
+    print(
+        f"\nburst: {n} queries in {elapsed:.1f}s, "
+        f"{rate_limits.responses - before_responses} HTTP responses, {limited} were 429"
+        + ("  <- rate limited, see G18" if limited else "")
+    )
 
 
 def main() -> None:
@@ -118,6 +145,8 @@ def main() -> None:
             check()
         except Exception as exc:  # noqa: BLE001 - a smoke test reports any failure
             report(check.__name__, False, f"{type(exc).__name__}: {str(exc)[:100]}")
+    if "--no-burst" not in sys.argv:
+        measure_embedding_burst()
     print(
         f"\n{'ALL CHECKS PASSED' if not failures else f'{len(failures)} FAILED: {failures}'}"
     )

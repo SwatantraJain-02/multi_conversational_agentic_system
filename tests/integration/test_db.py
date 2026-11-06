@@ -1,6 +1,7 @@
-"""Tests for db_server/db.py against the real Northwind database (needs `docker compose up`).
+"""Tests for db_server/db.py against the real Northwind database on Aiven.
 
-They skip automatically when Postgres is not reachable.
+Run with `uv run pytest -m integration` (needs the POSTGRES_* values in .env and
+scripts/init_db.py run once). They skip automatically when Postgres is not reachable.
 """
 
 import time
@@ -10,13 +11,17 @@ from psycopg_pool import PoolTimeout
 
 from multi_agenti_conversation_system.mcp.servers.db_server import db
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(scope="module", autouse=True)
 def pool():
     try:
         db.get_pool()
     except PoolTimeout:  # the pool gives up after 10 s when Postgres is not running
-        pytest.skip("Postgres not reachable (is `docker compose up` running?)")
+        pytest.skip(
+            "Postgres not reachable (check POSTGRES_* in .env and the Aiven service)"
+        )
     yield
     db.close_pool()
 

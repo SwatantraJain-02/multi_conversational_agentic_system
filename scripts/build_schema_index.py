@@ -1,19 +1,25 @@
-"""Build the Chroma collections schema_docs and sql_seed_examples from data/*.yaml.
+"""Build the Pinecone namespaces schema_docs and sql_seed_examples from data/*.yaml.
 
-Run from the project root (needs Chroma and Ollama running):
+Run from the project root (needs PINECONE_API_KEY and OPENROUTER_API_KEY in .env):
     uv run python scripts/build_schema_index.py
 Re-run whenever data/schema_descriptions.yaml or data/few_shots.yaml changes.
 """
 
+import time
+
+from multi_agenti_conversation_system import vectorstore
+from multi_agenti_conversation_system.llm import get_embedding_model
 from multi_agenti_conversation_system.mcp.servers.db_server import (
     catalog,
     schema_index,
 )
 
 EXPECTED = {
-    schema_index.SCHEMA_COLLECTION: len(catalog.schema_tables()),
-    schema_index.FEW_SHOT_COLLECTION: len(catalog.few_shots()),
+    vectorstore.SCHEMA_DOCS: len(catalog.schema_tables()),
+    vectorstore.SQL_SEED_EXAMPLES: len(catalog.few_shots()),
 }
+# Pinecone makes fresh upserts queryable after a short delay (G14).
+SETTLE_S = 10
 
 # Dense-friendly (paraphrase), keyword-friendly (exact column names), and mixed.
 SAMPLE_QUESTIONS = [
@@ -24,12 +30,23 @@ SAMPLE_QUESTIONS = [
 
 
 def main() -> None:
+    embed_dim = get_embedding_model().dimension()
+    index_dim = vectorstore.index_dimension()
+    print(f"embedding dimension {embed_dim}, index dimension {index_dim}")
+    if embed_dim != index_dim:
+        raise SystemExit(
+            "Dimension mismatch: the index was built for another model. "
+            "Delete the index in Pinecone and re-run (it is recreated with the right size)."
+        )
+
     counts = schema_index.build_index()
     for name, count in counts.items():
         status = (
             "OK" if count == EXPECTED[name] else f"MISMATCH (expected {EXPECTED[name]})"
         )
         print(f"{name}: {count} documents  {status}")
+
+    time.sleep(SETTLE_S)
 
     for question in SAMPLE_QUESTIONS:
         print(f"\n{question!r}")

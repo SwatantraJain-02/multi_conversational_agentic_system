@@ -25,8 +25,9 @@ def get_pool() -> ConnectionPool:
     global __pool
 
     if __pool is None:
+        # Small on purpose: every service shares Aiven's free-tier connection cap (G16).
         __pool = ConnectionPool(
-            settings.northwind_conninfo, min_size=1, max_size=5, open=False
+            settings.northwind_conninfo, min_size=1, max_size=3, open=False
         )
         __pool.open(wait=True, timeout=10)
 

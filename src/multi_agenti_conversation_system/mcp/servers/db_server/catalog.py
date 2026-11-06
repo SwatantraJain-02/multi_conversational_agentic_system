@@ -1,6 +1,6 @@
 """Single place that reads the schema descriptions and few-shot examples from data/*.yaml.
 
-The SQL validator (table allowlist, PII columns), the schema indexer (Chroma documents)
+The SQL validator (table allowlist, PII columns), the schema indexer (Pinecone documents)
 and the MCP tools (list_tables, get_schema) all read from here, so they can never disagree.
 """
 
