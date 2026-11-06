@@ -38,6 +38,7 @@
 | 2b Hybrid retrieval | **Done** (commit `171006a`). Dense + BM25 → RRF, degraded mode. BM25 moved into Pinecone in Phase A |
 | A Cloud migration | **Done** (commit `f9de2a2`). Aiven set up, Pinecone document index (4096-dim), smoke + integration tests green |
 | B Web MCP server | **Done (6 Nov).** `search_web` + `fetch_page` with SSRF guard and rate limits; smoke + 37 unit tests green; both MCP servers run with bearer auth ON |
+| C Foundations | **In progress.** Step 1 (MCP client) done and smoke-tested; prompts, tracing, A2A plumbing, echo agent remaining |
 | C–L | Not started |
 
 ---
