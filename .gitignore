@@ -228,3 +228,4 @@ __marimo__/
 # eval results (the folder is eval/, not evals/)
 /eval/results/
 .DS_Store
+logs/
