@@ -137,33 +137,33 @@ sequenceDiagram
 
 # Part 2: Low-level design (LLD)
 
-## 2.1 Supervisor graph [G, H, I]
+## 2.1 Supervisor graph [G, H, I] (built)
 
 ```mermaid
 flowchart TD
-    S([START]) --> ig["input_guard"]
-    ig -->|"blocked"| resp
-    ig --> ctx["contextualize<br/>standalone question + entity_key"]
+    S([START]) --> ig["input_guard<br/>limits, heuristics, classifier, PII flag"]
+    ig -->|"blocked"| rf["refuse<br/>(the exchange leaves the conversation)"]
+    rf --> E([END])
+    ig --> ctx["contextualize<br/>standalone question + entity_key<br/>(no model call on a first turn)"]
     ctx --> lp["load_profile<br/>profile + profile_hash"]
     lp --> cc{"check_cache"}
-    cc -->|"hit"| resp["respond"]
+    cc -->|"hit"| wm
     cc -->|"miss"| lc["load_context<br/>top 3 facts, top 2 episodes"]
-    lc --> pl["planner (LLM)<br/>RouteDecision"]
+    lc --> pl["planner (LLM)<br/>RouteDecision, one repair attempt"]
     pl --> sv{"supervisor<br/>deterministic"}
-    sv -->|"steps ready (Send, parallel)"| dp["dispatch<br/>one A2A task per step"]
-    dp --> sv
-    dp -->|"SQL step is input-required"| hg["hitl_gate<br/>interrupt(payload)"]
-    hg -->|"user approves / rejects"| rd["resume_dispatch<br/>same A2A contextId"]
+    sv -->|"steps ready (Send, parallel)"| rs["run_step<br/>one A2A task per step"]
+    rs --> sv
+    sv -->|"a step is input-required"| hg["hitl_gate<br/>interrupt(payload)"]
+    hg -->|"user approves / rejects"| rd["resume_dispatch<br/>same A2A task"]
     rd --> sv
-    sv -->|"step failed"| pl
-    sv -->|"plan done / budget of 5 / direct"| fin["finalize<br/>profile formatting only"]
-    fin --> og["output_guard"]
-    og --> resp
-    resp --> wm["write_memory"]
-    wm --> wf["write_facts"] & up["update_profile"] & we["write_episode"] & wc["write_cache"]
-    wf & up & we & wc --> sh["summarize_history<br/>only past threshold"]
-    sh --> E([END])
+    sv -->|"plan done / budget of 5 dispatches"| fin["finalize<br/>composed in code, gaps named,<br/>output guard applied"]
+    sv -->|"direct"| da["direct_answer<br/>output guard applied"]
+    fin & da --> wm["write_memory<br/>learn (write-gate) + cache + episode,<br/>each part isolated"]
+    wm --> sh["summarize_history<br/>only past threshold"]
+    sh --> E
 ```
+
+There is **no re-planning after a failed step** (decided in Phase G): the gap is named in a partial answer instead. The output guard is not a node of its own: it runs inside the function that builds every answer, so the text shown, checkpointed and cached is the guarded one.
 
 **Why three HITL nodes:** when a run resumes after `interrupt()`, LangGraph re-runs that whole node. If `dispatch` also interrupted, resuming would send the SQL task a second time (G22).
 
@@ -177,32 +177,52 @@ flowchart TD
 | direct (chit-chat) | `[]` |
 | internal vs market | `sql → synthesis`, and Synthesis fetches web data itself (the delegation demo) |
 
-## 2.2 Supervisor state [G]
-
-The exact fields are settled in Phase G. This is the intended shape.
+## 2.2 Supervisor state [G, H, I] (built, `supervisor/state.py`)
 
 ```mermaid
 classDiagram
     class AgentState {
-        +list messages
-        +str summary
-        +Session session
-        +dict profile
-        +str profile_hash
+        +list messages  (kept across turns)
+        +str summary  (kept across turns)
+        +int turns  (kept across turns)
+        -- this turn: input --
+        +str question
+        +str user_id
+        +str thread_id
+        +str selected_domain
+        -- input guard --
+        +bool guard_blocked
+        +bool guard_flagged
+        +list guard_reasons
+        +list input_pii
+        -- memory --
         +str standalone_question
         +str entity_key
+        +bool standalone_ok
+        +bool memory_ok
+        +dict profile
+        +str profile_hash
+        +list facts
+        +list episodes
         +bool cache_hit
-        +list memories
-        +RouteDecision plan
-        +dict step_results
+        +list memory_changes
+        -- plan and results --
+        +str intent
+        +list plan
+        +str plan_error
+        +list ready
         +int dispatch_count
-        +PendingHitl pending_hitl
+        +dict results  (merge reducer)
+        +dict timings  (merge reducer)
+        +dict hitl_decision
+        +list approvals
+        -- answer --
         +str answer
+        +list citations
+        +str sql_used
+        +list agents_used
         +dict prompt_versions
-    }
-    class Session {
-        +str selected_domain
-        +dict filters
+        +bool partial
     }
     class RouteDecision {
         +str intent
@@ -216,20 +236,17 @@ classDiagram
         +str task
         +list~str~ depends_on
     }
-    class PendingHitl {
-        +str a2a_task_id
-        +str context_id
-        +dict payload
-    }
-    AgentState --> Session
     AgentState --> RouteDecision
-    AgentState --> PendingHitl
     RouteDecision --> PlanStep
 ```
 
-## 2.3 A2A contract [C]
+`graph.turn_input` resets everything marked "this turn" on each new turn (the accumulating fields with `Overwrite`); `messages`, `summary` and `turns` are restored from the checkpoint by the thread id.
 
-`a2a/contracts.py`. Carried as an A2A `DataPart` and validated by Pydantic on **both** ends.
+## 2.3 A2A contract (built)
+
+`a2a/contracts.py`. Each model travels as ONE A2A `Part` holding its JSON text (media type `application/json`), validated by Pydantic on **both** ends. Not a `DataPart`: that is a protobuf `Value`, which turns every number into a float (`product_id` 100 becomes 100.0). `trace_ctx` is not in these models: it travels in the A2A message metadata, so a resume keeps the trace. The card publishes the JSON schemas in an A2A extension.
+
+The diagram below predates the final model; `a2a/contracts.py` is authoritative (it adds `ResumeRequest`, `TaskRequest.data`, `TaskResult.a2a_task_id` / `context_id`, and the error codes `bad_request` and `internal`).
 
 ```mermaid
 classDiagram
@@ -291,7 +308,7 @@ stateDiagram-v2
     failed --> [*]
 ```
 
-## 2.4 A2A plumbing: discovery and failure handling [C]
+## 2.4 A2A plumbing: discovery and failure handling (built)
 
 ```mermaid
 flowchart TD
@@ -500,8 +517,8 @@ Only `active` facts are retrieved. They're ranked by `similarity × (0.7 + 0.3 �
 
 ```mermaid
 flowchart TD
-    q["standalone question + entity_key<br/>e.g. product_id=150"] --> f["Pinecone query on semantic_cache, exact filters:<br/>entity_key, profile_hash, prompt_version,<br/>expires_at > now or data_version current"]
-    f --> s{"best similarity ≥ calibrated threshold?"}
+    q["standalone question + entity_key<br/>e.g. 150"] --> f["Pinecone query on semantic_cache, exact filters<br/>(none may be missing: a None is an error):<br/>entity_key, profile_hash, prompt_version,<br/>data_version, expires_at > now"]
+    f --> s{"best similarity ≥ CACHE_THRESHOLD (0.87, calibrated)?"}
     s -->|"yes"| hit["HIT: return cached answer as-is"]
     s -->|"no"| miss["MISS: run full pipeline"]
     f -->|"no candidates (e.g. entry is for product_id=100)"| miss
@@ -511,7 +528,7 @@ flowchart TD
 
 Similarity alone would return product 100's answer for product 150. The exact `entity_key` filter makes that impossible.
 
-## 2.10 Guardrail layers along the request path [I]
+## 2.10 Guardrail layers along the request path [I] (all built)
 
 ```mermaid
 flowchart LR
@@ -525,10 +542,10 @@ flowchart LR
     g7["7 Trace masking<br/>Langfuse mask hook:<br/>PII + secrets"] -.-> g1 & g2 & g3 & g4 & g5 & g6
 
     classDef built fill:#d4edda,stroke:#2e7d32,color:#000
-    class g3 built
+    class g1,g2,g3,g4,g5,g6,g7 built
 ```
 
-## 2.11 Prompts and tracing through Langfuse [C]
+## 2.11 Prompts and tracing through Langfuse (built)
 
 ### Prompt lifecycle
 
@@ -566,14 +583,14 @@ sequenceDiagram
     Note over LF: one trace per turn, all services nested (G20)
 ```
 
-## 2.12 Evaluation pipeline [K]
+## 2.12 Evaluation pipeline [K] (built, not yet run)
 
 ```mermaid
 flowchart TD
-    ds["eval/dataset.yaml (~40 cases)<br/>normal, complex, hybrid, ambiguous,<br/>failure, memory reuse, cache near-miss"] -->|"sync_eval_dataset.py"| lds["Langfuse dataset"]
+    ds["evals/dataset.yaml (39 cases)<br/>normal, complex, hybrid, ambiguous,<br/>failure, memory reuse, cache near-miss"] -->|"sync_eval_dataset.py"| lds["Langfuse dataset"]
     lds --> run["run_eval.py --label development | production"]
-    run --> iso["Run isolation per run:<br/>run_id-suffixed namespaces,<br/>EVAL_MODE (no learned pairs),<br/>fresh user + thread ids"]
-    iso --> sys["Supervisor + agents<br/>(each item gets its own trace)"]
+    run --> iso["Run isolation per run:<br/>services on spare ports with EVAL_MODE (no learned pairs),<br/>fresh user + thread ids per case,<br/>what a case wrote is deleted after it"]
+    iso --> sys["Supervisor + agents<br/>(each item's turn nests under its experiment trace)"]
     sys --> det["Deterministic scorers:<br/>route, agents, A2A schema valid,<br/>SQL runs, result matches gold,<br/>citations, guardrail blocked, latency"]
     sys --> jdg["LLM judge (JUDGE_MODEL, different model)<br/>relevance, correctness, groundedness,<br/>completeness, clarity: 1-5 + reason"]
     det & jdg --> sc["Scores in Langfuse<br/>(linked to traces + prompt versions)"]
@@ -584,7 +601,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    ui["ui/streamlit_app.py"] --> sup["supervisor/"]
+    ui["src/ui/streamlit_app.py"] --> sup["supervisor/"]
     sup --> mem["memory/"]
     sup --> a2ac["a2a/client.py"]
     ag["agents/sql, web, synthesis"] --> a2as["a2a/server.py"]
@@ -610,9 +627,11 @@ flowchart TD
 |---|---|---|---|
 | DB MCP server | 5555 | 2, 2b, A | built |
 | Web MCP server | 5556 | B | built |
-| SQL Agent (A2A) | 7001 | D | planned |
-| Web Agent (A2A) | 7002 | E | planned |
-| Synthesis Agent (A2A) | 7003 | F | planned |
-| Streamlit UI + supervisor | 8501 | G, J | planned |
+| Echo test agent (A2A) | 7009 | C | built (plumbing test only) |
+| SQL Agent (A2A) | 7001 | D | built |
+| Web Agent (A2A) | 7002 | E | built |
+| Synthesis Agent (A2A) | 7003 | F | built |
+| Supervisor (library, `supervisor/service.py`; runs in the UI process) | none | G | built |
+| Streamlit UI | 8501 | J | written, not yet tried in a browser |
 
 `scripts/run_all.py` starts everything and waits for each `/health` and agent card.
