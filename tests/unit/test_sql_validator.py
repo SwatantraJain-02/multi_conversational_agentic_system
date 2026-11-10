@@ -2,6 +2,7 @@ import pytest
 
 from multi_agenti_conversation_system.guardrails.sql_validator import (
     find_pii_columns,
+    is_aggregate_query,
     validate_select,
 )
 from multi_agenti_conversation_system.mcp.servers.db_server import catalog
@@ -191,3 +192,36 @@ def test_pii_detection_matches_the_few_shot_pii_flags():
     for example in catalog.few_shots():
         flagged = bool(find_pii_columns(example["sql"], pii))
         assert flagged == example.get("pii", False), example["question"]
+
+
+# ------------------------------------------------------------- is_aggregate_query
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT COUNT(*) FROM orders",
+        "SELECT country, COUNT(*) FROM customers GROUP BY country",
+        "SELECT SUM(unit_price * quantity) AS revenue FROM order_details",
+        "SELECT c.name, SUM(x) FROM a JOIN b ON a.id = b.id GROUP BY c.name HAVING SUM(x) > 1",
+        "WITH t AS (SELECT * FROM orders) SELECT COUNT(*) FROM t",
+        "SELECT MAX(freight) - MIN(freight) FROM orders",
+    ],
+)
+def test_aggregate_queries_are_recognised(sql):
+    assert is_aggregate_query(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM orders",
+        "SELECT order_id, freight FROM orders WHERE freight > 10",
+        "SELECT DISTINCT country FROM customers",
+        "SELECT order_id, SUM(freight) OVER (PARTITION BY customer_id) FROM orders",
+        "SELECT * FROM (SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY 1) t",
+        "SELECT order_id FROM orders WHERE freight > (SELECT AVG(freight) FROM orders)",
+        "SELECT a FROM t1 UNION SELECT a FROM t2",
+        "this is not sql at all",
+    ],
+)
+def test_row_returning_queries_are_not_aggregates(sql):
+    assert not is_aggregate_query(sql)

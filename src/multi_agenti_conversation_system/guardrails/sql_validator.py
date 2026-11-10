@@ -224,3 +224,30 @@ def find_pii_columns(sql: str, pii_columns: dict[str, set[str]]) -> list[str]:
                     break  # qualifier resolved in the innermost scope that defines it
 
     return sorted(found)
+
+
+def is_aggregate_query(sql: str) -> bool:
+    """Does the outermost SELECT collapse rows (GROUP BY, or an aggregate in its output)?
+
+    Such a query's result is small however large EXPLAIN's estimate is: the planner's row
+    estimate for a join with an aggregate is unreliable (and the server clamps it to the row
+    limit), so "the result would be cut off" must not be concluded from it. A window
+    function (SUM(x) OVER ...) does not collapse rows and doesn't count. Unparseable SQL
+    and set operations (UNION) count as not aggregate: the estimate is then all there is.
+    """
+    try:
+        tree = sqlglot.parse_one(sql, dialect=DIALECT)
+    except SqlglotError:
+        return False
+    if not isinstance(tree, exp.Select):
+        return False
+    if tree.args.get("group"):
+        return True
+    for projection in tree.expressions:
+        for agg in projection.find_all(exp.AggFunc):
+            if (
+                agg.find_ancestor(exp.Select) is tree
+                and agg.find_ancestor(exp.Window) is None
+            ):
+                return True
+    return False
