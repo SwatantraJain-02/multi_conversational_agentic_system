@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     LANGFUSE_SECRET_KEY: str = ""
     LANGFUSE_BASE_URL: str = "https://cloud.langfuse.com"
     PROMPT_LABEL: str = "production"
+    # How long a fetched prompt is reused before Langfuse is asked again: a prompt promoted
+    # in the UI reaches the running agents within this many seconds.
+    PROMPT_CACHE_TTL_S: int = 60
+    # Keep these small: a bad key or an outage must not stall an agent for long.
+    PROMPT_FETCH_TIMEOUT_S: int = 3
+    # Off in unit tests and offline runs. Tracing is also off when the keys are empty.
+    TRACING_ENABLED: bool = True
 
     # ---------------------------
     # MCP configuration
@@ -82,6 +89,26 @@ class Settings(BaseSettings):
     WEB_SEARCH_BURST: int = 5
     WEB_FETCH_PER_MIN: int = 30
     WEB_FETCH_BURST: int = 10
+
+    # ---------------------------
+    # A2A agents (each its own service; the supervisor is the A2A client)
+    # ---------------------------
+    A2A_HOST: str = "localhost"
+    # One static bearer token shared by every agent (same model as the MCP servers).
+    A2A_TOKEN: str = ""
+    # Default per-call deadline; a TaskRequest's constraints.timeout_s overrides it.
+    A2A_TIMEOUT_S: float = 60.0
+    SQL_AGENT_PORT: int = 7001
+    WEB_AGENT_PORT: int = 7002
+    SYNTHESIS_AGENT_PORT: int = 7003
+    ECHO_AGENT_PORT: int = 7009  # plumbing test agent (Phase C)
+
+    # Discovery: the registry fetches each URL's agent card. JSON list in .env.
+    AGENT_URLS: list[str] = [
+        "http://localhost:7001",
+        "http://localhost:7002",
+        "http://localhost:7003",
+    ]
 
     def _conninfo(self, dbname: str, user: str, password: str) -> str:
         return make_conninfo(
