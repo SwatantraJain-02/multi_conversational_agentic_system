@@ -1,0 +1,6 @@
+# Local fallback and seed for the Langfuse prompt "plumbing/echo-reply".
+# Used by the echo test agent (Phase C) to prove prompts, versions and trace linking.
+# Variables are written {{name}}, the same syntax in Langfuse and here.
+type: text
+prompt: "echo: {{task}}"
+commit_message: "Initial version (plumbing test)"
