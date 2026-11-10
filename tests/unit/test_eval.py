@@ -318,3 +318,35 @@ def test_the_summary_reports_no_failures_when_there_are_none():
         None,
     )
     assert "- none" in md
+
+
+def test_the_summary_flags_cases_where_the_model_call_failed():
+    rows = [
+        {"case": "n01", "category": "normal", "answer": "fine", "answered": 1},
+        {
+            "case": "n02",
+            "category": "normal",
+            "answer": "no valid plan (the model call failed: rate limit)",
+            "answered": 1,
+        },
+    ]
+    md = run_eval.summary(rows, ["answered"], "r", "development", None)
+    assert (
+        "Not a quality result" in md
+        and "n02" in md
+        and "n01" not in md.split("Not a quality")[1].split("\n")[0]
+    )
+
+
+def test_preflight_stops_the_run_when_the_model_is_unusable(monkeypatch):
+    import pytest
+
+    class Down:
+        async def ainvoke(self, _):
+            raise RuntimeError("Rate limit exceeded")
+
+    monkeypatch.setattr(
+        "multi_agenti_conversation_system.llm.get_chat_model", lambda: Down()
+    )
+    with pytest.raises(SystemExit, match="Nothing was run"):
+        run_eval.preflight()

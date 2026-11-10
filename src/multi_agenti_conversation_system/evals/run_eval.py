@@ -306,6 +306,16 @@ def summary(
             float(r[n]) for r in group for n in binary if r.get(n) not in (None, "")
         ]
         lines.append(f"| {cat} | {len(group)} | {_mean(vals)} |")
+    broken = [r["case"] for r in rows if MODEL_FAILED in (r.get("answer") or "")]
+    if broken:
+        lines += [
+            "",
+            (
+                "> **Not a quality result:** the model call failed (rate limit or outage) "
+                f"in {len(broken)} case(s): {', '.join(broken)}. Re-run them before reading "
+                "the scores."
+            ),
+        ]
     lines += ["", "## Failed checks", ""]
     failed = [
         (r["case"], n)
@@ -318,6 +328,23 @@ def summary(
 
 
 # ----------------------------------------------------------------------------- main
+MODEL_FAILED = "the model call failed"  # the planner's marker (supervisor/nodes.py)
+
+
+def preflight() -> None:
+    """One tiny model call before anything starts: a rate-limited or unreachable model would
+    otherwise turn every case into a failure that looks like a quality problem."""
+    from multi_agenti_conversation_system.llm import get_chat_model
+
+    try:
+        asyncio.run(get_chat_model().ainvoke("Reply with the single word OK."))
+    except Exception as exc:
+        raise SystemExit(
+            f"the chat model is not usable right now ({type(exc).__name__}: {str(exc)[:200]}). "
+            "Nothing was run. Fix that (quota, key, network), then start again."
+        ) from exc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
@@ -333,6 +360,7 @@ def main() -> None:
 
     settings.PROMPT_LABEL, settings.EVAL_MODE = args.label, True
     cases = load_cases(args.category, args.limit)
+    preflight()
     print(f"{len(cases)} case(s), prompt label {args.label!r}, run {run_name!r}")
     with eval_stack(args.label) as stack:
         settings.A2A_TOKEN = stack["token"]
