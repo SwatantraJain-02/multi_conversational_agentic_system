@@ -134,9 +134,13 @@ async def planner(state: AgentState, runtime: Rt) -> dict[str, Any]:
                 model=settings.CHAT_MODEL,
             )
         except Exception as exc:  # noqa: BLE001 - an unusable reply is an attempt, not a crash
+            # The exception names the cause (a rate limit, a timeout, a reply that did not
+            # parse); keep it, so "no valid plan" is never mistaken for a prompt problem.
             logger.warning("planner call failed: %s", exc)
-            error = "your reply was not valid JSON for the plan schema (or the model failed)"
-            feedback = f"Your previous reply was unusable: {error}. Reply with valid JSON only.\n\n"
+            error = f"the model call failed: {exc}"
+            feedback = (
+                "Your previous reply was unusable. Reply with valid JSON only.\n\n"
+            )
             continue
         error = validate_plan(decision, capabilities) or ""
         if not error:
