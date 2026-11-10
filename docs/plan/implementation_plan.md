@@ -46,8 +46,8 @@
 | H Long-term memory + semantic cache | **Done, awaiting review (10 Nov).** `smoke_memory.py` passes live, all 21 checks (the first run failed 6: see below). 51 memory tests; `calibrate_cache.py` measured Nemotron |
 | I Guardrails | **Done, awaiting review (10 Nov).** One test per layer (`test_guardrails.py`) + in-graph tests; `smoke_guardrails.py` live, 9 of 9 |
 | J Streamlit UI | **Done except the screen recording, awaiting review (10 Nov).** `scripts/smoke_ui.py` drives the real page with Streamlit's `AppTest` against the live services: all 16 checks pass. Not yet looked at in a browser |
-| K Evals | **Harness written (10 Nov), no run yet.** 39-case dataset, scorers (unit-tested), judge, Langfuse experiment runner, CSV and summary export |
-| L Deliverables | README written; diagram, report and presentation not started |
+| K Evals | **Harness written (10 Nov); first run invalid.** 39-case dataset, scorers (unit-tested), judge, Langfuse experiment runner, CSV and summary export. The first baseline hit the OpenRouter free daily quota after 23 cases (the last 16 failed as "no valid plan"): the runner now checks the model first and flags such cases. Re-run pending the quota reset |
+| L Deliverables | README, demo guide and presentation outline written; diagram and evaluation report not started |
 
 ---
 
