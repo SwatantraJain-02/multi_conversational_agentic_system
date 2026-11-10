@@ -35,6 +35,10 @@ async def main() -> None:
         result = await by_name["list_tables"].ainvoke({})
         check("a DB tool call works through the adapter", "orders" in str(result))
         result = await by_name["fetch_page"].ainvoke({"url": "http://127.0.0.1/"})
+        if "rate_limited" in str(result):
+            # A smoke script that ran just before may have emptied the fetch bucket.
+            await asyncio.sleep(3)
+            result = await by_name["fetch_page"].ainvoke({"url": "http://127.0.0.1/"})
         check(
             "a web tool call works (SSRF block returned as data)",
             "blocked" in str(result),

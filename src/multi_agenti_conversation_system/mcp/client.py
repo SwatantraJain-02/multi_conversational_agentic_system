@@ -10,10 +10,12 @@ for the whole block (the caller's lifetime), not reopened per call.
 `langchain.mcp` is in beta (G2): the import warning is silenced here, in one place.
 """
 
+import json
 import warnings
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from fastmcp.client.transports import StreamableHttpTransport
 from langchain_core._api import LangChainBetaWarning
@@ -57,7 +59,7 @@ def servers() -> dict[str, McpServer]:
 
 
 @asynccontextmanager
-async def open_mcp(names: Sequence[str]) -> AsyncIterator[dict[str, list[BaseTool]]]:
+async def open_mcp(names: Sequence[str]) -> AsyncGenerator[dict[str, list[BaseTool]]]:
     """Connect to the named servers and yield their tools, grouped per server.
 
     Raises ValueError for an unknown server name. A server that is down or rejects the
@@ -76,3 +78,25 @@ async def open_mcp(names: Sequence[str]) -> AsyncIterator[dict[str, list[BaseToo
             adapter = await stack.enter_async_context(MCPAdapter(transport))
             tools[name] = await adapter.list_tools()
         yield tools
+
+
+def tool_result(raw: Any) -> dict[str, Any]:
+    """The dict an MCP tool returned, from the content blocks the adapter hands back.
+
+    Our servers answer every call with one JSON object ({"ok": ..., ...}). Anything else
+    (a transport hiccup, a malformed reply) becomes {"ok": False, "error": ...}, so callers
+    only ever deal with that one shape.
+    """
+    try:
+        if isinstance(raw, str):
+            return json.loads(raw)
+        blocks = raw if isinstance(raw, list) else [raw]
+        text = "".join(b["text"] if isinstance(b, dict) else str(b) for b in blocks)
+        data = json.loads(text)
+        return (
+            data
+            if isinstance(data, dict)
+            else {"ok": False, "error": "unexpected tool reply"}
+        )
+    except ValueError, KeyError, TypeError:
+        return {"ok": False, "error": "unreadable tool reply"}
