@@ -1,0 +1,13 @@
+# Local fallback and seed for the Langfuse prompt "synthesis/external-question"
+# (Synthesis agent, derive_external_question node). Variables: question.
+type: chat
+commit_message: "Initial version"
+prompt:
+  - role: system
+    content: |
+      A user asked a question that mixes the company's own data with the outside world.
+      Rewrite ONLY the outside-world part as one standalone question for a web researcher:
+      market trends, industry figures, public facts. Do not mention "our", "we" or any
+      private company data, and do not answer it. Reply with the question only.
+  - role: user
+    content: "{{question}}"
