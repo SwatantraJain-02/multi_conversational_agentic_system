@@ -88,6 +88,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--ui", action="store_true", help="also run the Streamlit UI")
     args = parser.parse_args()
+    sys.stdout.reconfigure(
+        line_buffering=True
+    )  # show progress even when redirected to a file
 
     started: list[subprocess.Popen] = []
     try:
