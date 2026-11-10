@@ -115,6 +115,29 @@ class Settings(BaseSettings):
     # No cache reads or writes and no writes to shared memory (learned SQL pairs). Smoke
     # tests and evals turn this on.
     EVAL_MODE: bool = False
+    # ---------------------------
+    # Long-term memory and the semantic cache (Phase H)
+    # ---------------------------
+    # Bump by hand when the business data changes (a reload, a new quarter): every cached
+    # DB answer written under another value stops matching.
+    DATA_VERSION: str = "1"
+    # Cosine similarity a cached question must reach. scripts/calibrate_cache.py measured
+    # Nemotron: paraphrases 0.79-0.96, different questions about one entity up to 0.85.
+    # 0.87 trades a few paraphrase misses for no wrong hit (a wrong hit is the worse error).
+    CACHE_THRESHOLD: float = 0.87
+    CACHE_TTL_WEB_S: int = 24 * 3600
+    CACHE_TTL_DB_S: int = (
+        7 * 24 * 3600
+    )  # a backstop: DATA_VERSION is the real invalidation
+    # Memory retrieval (see the memory guide in the plan): top-k and minimum similarity.
+    FACTS_TOP_K: int = 3
+    # Nemotron scores a relevant fact at 0.21-0.62 and an unrelated one at <= 0.12
+    # (scripts/calibrate_cache.py), far below the 0.75 a stronger model would use.
+    FACTS_MIN_SIMILARITY: float = 0.18
+    EPISODES_TOP_K: int = 2
+    EPISODES_MIN_SIMILARITY: float = 0.25
+    EPISODE_EVERY_N_TURNS: int = 5
+    FACTS_MAX_PER_USER: int = 200
     # Discovery: the registry fetches each URL's agent card. JSON list in .env.
     AGENT_URLS: list[str] = [
         "http://localhost:7001",

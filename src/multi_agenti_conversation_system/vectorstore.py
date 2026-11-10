@@ -154,6 +154,62 @@ def delete(namespace: str, ids: Sequence[str]) -> None:
         get_index().documents.delete(namespace=namespace, ids=list(ids))
 
 
+def fetch(
+    namespace: str,
+    ids: Sequence[str] = (),
+    filter: dict[str, Any] | None = None,
+    limit: int = 100,
+) -> dict[str, dict[str, Any]]:
+    """Documents by id, or by filter, as `{id: {field: value}}` (the embedding is not returned).
+
+    A fetch by id sees a fresh upsert at once; only *search* lags behind (G14). An id that
+    does not exist is simply absent.
+    """
+    index = get_index()
+    if ids:
+        response = index.documents.fetch(namespace=namespace, ids=list(ids))
+    else:
+        response = index.documents.fetch(
+            namespace=namespace, filter=filter, limit=limit
+        )
+    return {
+        doc_id: {k: v for k, v in doc.to_dict().items() if k not in (EMBEDDING_FIELD,)}
+        for doc_id, doc in response.documents.items()
+    }
+
+
+def update(namespace: str, doc_id: str, **fields: Any) -> None:
+    """Change some fields of one document (the others, and its vectors, stay)."""
+    get_index().documents.update(
+        namespace=namespace, documents=[{"_id": doc_id, **clean_metadata(fields)}]
+    )
+
+
+def delete_where(namespace: str, filter: dict[str, Any]) -> None:
+    get_index().documents.delete(namespace=namespace, filter=filter)
+
+
+def build_filter(
+    eq: dict[str, Any] | None = None, gt: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """An AND of exact matches and `>` comparisons.
+
+    Unlike `eq_filter` it NEVER drops a field: a None in `eq` is an error. A silently
+    dropped clause would widen a cache lookup to every entry (the product 100 vs 150 false
+    hit), so "no value" must be written as an explicit "".
+    """
+    clauses: dict[str, Any] = {}
+    for field, value in (eq or {}).items():
+        if value is None:
+            raise ValueError(f"filter field {field!r} is None")
+        clauses[field] = {"$eq": value}
+    for field, value in (gt or {}).items():
+        if value is None:
+            raise ValueError(f"filter field {field!r} is None")
+        clauses.setdefault(field, {})["$gt"] = value
+    return clauses
+
+
 def eq_filter(**fields: Any) -> dict[str, Any] | None:
     """`{"field": {"$eq": value}}` for every non-None value, or None when there are none."""
     clauses = {
