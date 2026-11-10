@@ -103,6 +103,18 @@ class Settings(BaseSettings):
     SYNTHESIS_AGENT_PORT: int = 7003
     ECHO_AGENT_PORT: int = 7009  # plumbing test agent (Phase C)
 
+    # ---------------------------
+    # SQL agent
+    # ---------------------------
+    # Human approval is asked when the query touches PII, or when its estimated row count
+    # reaches this value. The server clamps every query to MAX_ROWS before EXPLAIN, so the
+    # estimate never exceeds MAX_ROWS: keep this at or below it ("the result would be cut off").
+    SQL_APPROVAL_ROWS: int = 100
+    # Self-correction: how many times a failed query may be regenerated (1 + this many attempts).
+    SQL_MAX_RETRIES: int = 2
+    # No cache reads or writes and no writes to shared memory (learned SQL pairs). Smoke
+    # tests and evals turn this on.
+    EVAL_MODE: bool = False
     # Discovery: the registry fetches each URL's agent card. JSON list in .env.
     AGENT_URLS: list[str] = [
         "http://localhost:7001",
