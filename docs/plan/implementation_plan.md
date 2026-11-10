@@ -45,7 +45,7 @@
 | G Supervisor + short-term memory | **Done, awaiting review (10 Nov).** `smoke_supervisor.py` passes live with five processes, all checks, on the third run (web, SQL, follow-up, hybrid in parallel, compare, direct, approve and decline, trimming, restart, trace session id, Web agent down); 50 supervisor tests; 344 unit tests green. Re-planning after a failed step was skipped |
 | H Long-term memory + semantic cache | **Done, awaiting review (10 Nov).** `smoke_memory.py` passes live, all 21 checks (the first run failed 6: see below). 51 memory tests; `calibrate_cache.py` measured Nemotron |
 | I Guardrails | **Done, awaiting review (10 Nov).** One test per layer (`test_guardrails.py`) + in-graph tests; `smoke_guardrails.py` live, 9 of 9 |
-| J Streamlit UI | **Code written (10 Nov), not yet exercised in a browser.** `src/ui/streamlit_app.py`, `scripts/run_all.py`, service methods for feedback and the memory panel (unit-tested) |
+| J Streamlit UI | **Done except the screen recording, awaiting review (10 Nov).** `scripts/smoke_ui.py` drives the real page with Streamlit's `AppTest` against the live services: all 16 checks pass. Not yet looked at in a browser |
 | K Evals | **Harness written (10 Nov), no run yet.** 39-case dataset, scorers (unit-tested), judge, Langfuse experiment runner, CSV and summary export |
 | L Deliverables | README written; diagram, report and presentation not started |
 
@@ -526,13 +526,14 @@ None of these is a CS3 minimum demo.
   - Node-progress streaming, and Approve/Reject on a HITL interrupt.
   - Under each answer: citations, SQL used, a cache-hit badge, the agents used, prompt versions, and thumbs up/down. A thumbs-down deletes the cache entry or learned pair.
 - **Gate:** a screen recording of the five CS3 demo flows.
-- **Built (10 Nov), not yet exercised in a browser:** `src/ui/streamlit_app.py`, `scripts/run_all.py`, `Supervisor.{what_i_know, forget_fact, reset_profile, feedback}` (unit-tested with fakes), `trace_ctx` on `ask/resume`.
+- **Built (10 Nov):** `src/ui/streamlit_app.py`, `scripts/run_all.py`, `Supervisor.{what_i_know, forget_fact, reset_profile, feedback}` (unit-tested with fakes), `trace_ctx` on `ask/resume`.
   - **One event loop in a daemon thread** (`Backend`, kept by `st.cache_resource`) with the supervisor open on it for the whole process; the script submits coroutines to it and polls a queue for node events to show progress (G6). The supervisor serialises turns of a thread (G13).
   - Sidebar: user (changing it starts a new chat, because memory is per user), domain filter (any, sales, customers, products, hr, logistics), thread id, **New chat** (calls `end_thread`, which writes the conversation's episode), and the memory panel (preferences with the value each replaced, active facts with dates, forget and reset buttons).
   - Each answer: badges (cached answer, blocked, partial, agents used, route), Sources, SQL used, "What I learned this turn", prompt versions and Langfuse trace id, and 👍/👎. A 👎 deletes the cache entry for that question and forgets the SQL pair learned from it (shared by all users); both are a Langfuse score on the turn's trace.
   - A turn that needs approval shows the SQL, the PII columns and Approve / Reject buttons; the supervisor resumes the SQL agent's own waiting task.
   - `run_all.py [--ui]` starts both MCP servers and the three agents, waits for each `/health`, reuses anything already running, and stops what it started on Ctrl-C.
-- **Gate (to do):** run it in a browser, fix what breaks, then record the five demo flows.
+- **Gate results (10 Nov), `scripts/smoke_ui.py`** (`AppTest` runs the real page code in-process; needs `run_all.py` running; unique user, everything deleted at the end), all 16 checks passed: the page starts clean; a SQL question shows its answer, SQL, prompt versions and 👍/👎; a PII question shows the approval card with the SQL and the `customers.phone` column, and Approve runs it; a stated preference and fact appear in the memory panel (the fact dated; the poll waits out the fetch-by-filter lag); **New chat** starts empty and the next question still recalls the region; a thumbs-down is acknowledged. The first run failed one check, a bug in the check itself (it read the first code block on the page, which was the previous question's SQL).
+- **Still to do:** open it in a browser (`run_all.py --ui`), look at the layout, and record the five demo flows. `AppTest` proves the logic, not the appearance.
 
 
 ### Phase K — Evals (13–14 Nov) [Must]

@@ -129,6 +129,7 @@ uv run pytest tests/unit                       # offline, fast, no network
 uv run python scripts/smoke_supervisor.py      # live end-to-end gate (about 6 min)
 uv run python scripts/smoke_memory.py          # live memory and cache gate (about 6 min)
 uv run python scripts/smoke_guardrails.py      # live guard classifier gate
+uv run python scripts/smoke_ui.py              # drives the real UI page (run_all.py must be running)
 ```
 
 The other smoke scripts (`smoke_llm`, `smoke_db_mcp`, `smoke_web_mcp`, `smoke_mcp_client`,
