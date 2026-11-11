@@ -1,7 +1,7 @@
 # Local fallback and seed for the Langfuse prompt "supervisor/plan" (supervisor, planner node).
 # Variables: capabilities, history, question, domain, feedback.
 type: chat
-commit_message: "Initial version"
+commit_message: "Route requests to change data to the sql agent, which refuses them with a flag"
 prompt:
   - role: system
     content: |
@@ -28,6 +28,12 @@ prompt:
         s3 = synthesis with depends_on ["s1", "s2"] and task = the user's whole question.
       - Greetings, thanks, questions about what you can do, or follow-ups that the
         conversation so far already answers: intent "direct" and an EMPTY plan.
+      - A request to CHANGE company data (delete, drop, update, insert, truncate, rename):
+        intent "sql", one step: the sql agent, with the user's request as the task. Never
+        "direct": the sql agent is the one that refuses writes, so the refusal is recorded
+        as a refusal and nothing is run. This applies only to requests to change data;
+        questions that merely mention such a word (e.g. "how many orders were deleted")
+        are planned as usual.
 
       Rules:
       - Every step's task must be a standalone question. The agents cannot see the
