@@ -46,8 +46,8 @@
 | H Long-term memory + semantic cache | **Done, awaiting review (10 Nov).** `smoke_memory.py` passes live, all 21 checks (the first run failed 6: see below). 51 memory tests; `calibrate_cache.py` measured Nemotron |
 | I Guardrails | **Done, awaiting review (10 Nov).** One test per layer (`test_guardrails.py`) + in-graph tests; `smoke_guardrails.py` live, 9 of 9 |
 | J Streamlit UI | **Done except the screen recording, awaiting review (10 Nov).** `scripts/smoke_ui.py` drives the real page with Streamlit's `AppTest` against the live services: all 16 checks pass. Not yet looked at in a browser |
-| K Evals | **Harness written (10 Nov); first run invalid.** 39-case dataset, scorers (unit-tested), judge, Langfuse experiment runner, CSV and summary export. The first baseline hit the OpenRouter free daily quota after 23 cases (the last 16 failed as "no valid plan"): the runner now checks the model first and flags such cases. Re-run pending the quota reset |
-| L Deliverables | README, demo guide, presentation outline and the three diagrams (`architecture_diagrams.md`, Mermaid; PDF export is a manual step) written; evaluation report not started |
+| K Evals | **Done, awaiting review (11 Nov).** 39-case dataset, scorers, judge, Langfuse experiment runner; three runs (`baseline-v1`, `planner-v3`, `judge-v2`) and [the report](../deliverables/evaluation_report.md). Planner prompt v3 fixed the one failing check (`refused` 0.00 to 1.00); the judge fix raised correctness 3.44 to 4.74 on an unchanged system. The first baseline attempt was lost to the free daily quota and discarded; the runner now checks the model first |
+| L Deliverables | README, demo guide, presentation outline, the three diagrams (`architecture_diagrams.md`, Mermaid; PDF export is a manual step) and the evaluation report written; presentation slides themselves and the demo recordings remain |
 
 ---
 
@@ -569,7 +569,13 @@ None of these is a CS3 minimum demo.
   - **Judge** (`JUDGE_MODEL` or the chat model, temperature 0, prompt `eval/judge`): relevance, correctness, groundedness, completeness, clarity, 1–5 each with a reason. A failed judgement is skipped, not scored 0.
   - **Runner:** starts the DB MCP, Web MCP and the three agents on spare ports (25555…27003) with `EVAL_MODE` and the run's prompt label, runs the cases one at a time as a Langfuse experiment over the Langfuse dataset (`--local` uses the YAML), and links each turn's trace to the experiment item (`trace_ctx`). Per case: a fresh user and thread, `setup` turns for the memory cases, a primed cache entry for the cache cases (`EVAL_MODE` is off for those turns only), the approval request answered with a decline; anything the case wrote is deleted after it (facts, profile, cache entries). **Run isolation is by unique user id and cleanup, not by a namespace suffix per run** (the plan's idea): simpler, and equivalent for what the cases touch.
   - **Output:** `results/<run-name>.csv` (one row per case, every score) and `results/<run-name>.md` (mean per metric, per category, the failed checks).
-- **Gate (to do):** two comparable runs (e.g. planner v1 vs v2) in Langfuse, the CSV, and the top 3 failure modes with the improvement made because of them.
+- **Gate results (11 Nov), three runs, 39 cases each, details in `docs/deliverables/evaluation_report.md`:**
+  - `baseline-v1` (planner prompt v2, judge v1): every deterministic check 1.00 except `refused` 0.00 (f03 "Drop the orders table", f04 "Delete all customers": planned as `direct`, so the SQL agent's refusal flag never ran).
+  - `planner-v3` (planner prompt v3: requests to change data go to the SQL agent): `refused` 1.00. One regression, n07, was a 120 s SQL-agent timeout (mean latency 42 s that run), not a routing change; it passed in the next run. a03 changed route (accepted by the dataset).
+  - `judge-v2` (judge prompt v2 shows the judge the SQL and rows; system unchanged): all deterministic checks 1.00; judge correctness 3.44 to 4.74, groundedness 3.23 to 4.79. The judge had scored gold-verified answers 1 of 5 because it could not see the data.
+  - Top three failure modes: (1) destructive requests refused by luck of the planner's wording (fixed); (2) a judge blind to the evidence (fixed); (3) internal wording in answers, "the result was not cut off" in 9 of 39 (not fixed: the `sql/explain` prompt).
+  - Lesson recorded: the first attempt hit the OpenRouter free daily quota and 16 cases failed as "no valid plan"; the planner now reports the real cause, the runner makes one model call before starting, and the summary flags cases lost to a model failure.
+  - Judge scores are comparable only between runs with the same judge (baseline-v1 and planner-v3).
 
 
 ### Phase L — Deliverables (15–16 Nov) [Must]
