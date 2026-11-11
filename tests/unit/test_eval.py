@@ -350,3 +350,43 @@ def test_preflight_stops_the_run_when_the_model_is_unusable(monkeypatch):
     )
     with pytest.raises(SystemExit, match="Nothing was run"):
         run_eval.preflight()
+
+
+def test_evidence_shows_the_sql_and_rows_but_never_pii_rows():
+    from multi_agenti_conversation_system.evals.judge import evidence_text
+
+    results = {
+        "s1": {
+            "agent": "sql",
+            "sql": "SELECT country, COUNT(*) FROM customers GROUP BY 1",
+            "data": {
+                "columns": ["country", "n"],
+                "rows": [["USA", 13]],
+                "row_count": 1,
+            },
+        },
+        "s2": {
+            "agent": "sql",
+            "sql": "SELECT phone FROM customers",
+            "data": {"pii_columns": ["phone"], "rows": [["secret"]], "row_count": 1},
+        },
+        "s3": {"agent": "sql", "data": {"rejected": True}},
+        "s4": {"agent": "sql", "data": {"refused": True}},
+        "s5": {"agent": "web", "data": {}},
+    }
+    text = evidence_text(results)
+    assert "USA" in text and "13" in text
+    assert "secret" not in text and "personal data" in text
+    assert "approval was declined" in text and "refused the request" in text
+    assert evidence_text(None) == "" and evidence_text({"w": {"agent": "web"}}) == ""
+
+
+async def test_the_judge_passes_the_evidence_to_the_prompt():
+    seen = {}
+
+    async def call(messages):
+        seen["text"] = str(messages)
+        return Judgement(**{c: {"score": 4, "reason": "ok"} for c in CRITERIA})
+
+    await Judge(call).judge("q", "a", [], "", evidence="s1: SQL run: SELECT 1")
+    assert "SELECT 1" in seen["text"]

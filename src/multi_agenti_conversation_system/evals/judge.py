@@ -25,6 +25,43 @@ class Criterion(BaseModel):
     reason: str
 
 
+EVIDENCE_ROWS = (
+    10  # rows of a result shown to the judge; the answer is graded against them
+)
+
+
+def evidence_text(results: dict[str, Any] | None) -> str:
+    """What the agents actually retrieved, for the judge: for each SQL step the query and the
+    first rows, for each web step its sources are already listed separately. Without this the
+    judge cannot tell a correct figure from an invented one. Rows from PII columns are never
+    included (the judge call is traced); a declined approval or a refusal is stated as such."""
+    lines: list[str] = []
+    for step_id, result in (results or {}).items():
+        data = result.get("data") or {}
+        if result.get("agent") != "sql":
+            continue
+        if data.get("refused"):
+            lines.append(
+                f"{step_id}: the SQL agent refused the request; nothing was run."
+            )
+        elif data.get("rejected"):
+            lines.append(
+                f"{step_id}: the query needed approval and approval was declined "
+                "(by design in this evaluation); nothing was run."
+            )
+        elif result.get("sql"):
+            lines.append(f"{step_id}: SQL run: {result['sql']}")
+            if data.get("pii_columns"):
+                lines.append("  (rows omitted: the result touches personal data)")
+            else:
+                rows = (data.get("rows") or [])[:EVIDENCE_ROWS]
+                lines.append(
+                    f"  columns: {data.get('columns')}; {data.get('row_count')} row(s) in "
+                    f"total, first {len(rows)}: {rows}"
+                )
+    return "\n".join(lines)
+
+
 class Judgement(BaseModel):
     relevance: Criterion
     correctness: Criterion
@@ -60,6 +97,7 @@ class Judge:
         answer: str,
         sources: list[dict[str, Any]],
         expected: str = "",
+        evidence: str = "",
     ) -> list[tuple[str, float, str]] | None:
         """[(criterion, score 1-5, reason)], or None when the judgement failed."""
         if not answer.strip():
@@ -75,6 +113,7 @@ class Judge:
                     answer=answer[:6000],
                     sources=listed or "(none)",
                     expected=expected or "(none)",
+                    evidence=evidence or "(none)",
                 )
             )
         except Exception as exc:  # noqa: BLE001

@@ -46,7 +46,7 @@ from multi_agenti_conversation_system.evals.dataset import (
     input_of,
     load_cases,
 )
-from multi_agenti_conversation_system.evals.judge import Judge
+from multi_agenti_conversation_system.evals.judge import Judge, evidence_text
 from multi_agenti_conversation_system.evals.scorers import score_item
 from multi_agenti_conversation_system.evals.stack import eval_stack
 from multi_agenti_conversation_system.supervisor.service import open_supervisor
@@ -212,6 +212,7 @@ def make_evaluators(runner: Runner, judge: Judge | None):
                 output["answer"],
                 output.get("citations") or [],
                 ", ".join(notes),
+                evidence_text(output.get("results")),
             )
         )
         return [
