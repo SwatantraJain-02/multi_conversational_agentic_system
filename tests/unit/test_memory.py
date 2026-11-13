@@ -4,7 +4,7 @@ facts (re-statement, contradiction, expiry, per-user isolation), the semantic ca
 
 import pytest
 from langgraph.store.memory import InMemoryStore
-from memory_fakes import FakeBackend, FakeEmbedder
+from memory_fakes import FakeBackend, FakeEmbedder, matches
 
 from multi_agenti_conversation_system import vectorstore
 from multi_agenti_conversation_system.config import settings
@@ -247,6 +247,52 @@ async def test_forget_deletes_the_fact_and_its_history(facts):
     assert not await facts.list_active("a", now=NOW) and not await facts.history(
         "a", "work_region"
     )
+
+
+class LaggingBackend(FakeBackend):
+    """Like Pinecone: a fetch by id is fresh, a fetch by filter sees the index as it was at
+    the last `catch_up()` (the real index lags a few seconds behind a write, G14)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.indexed: dict[str, dict[str, dict]] = {}
+
+    def catch_up(self) -> None:
+        self.indexed = {
+            ns: {i: dict(f) for i, f in d.items()} for ns, d in self.ns.items()
+        }
+
+    def fetch(self, namespace, ids=(), filter=None, limit=100):
+        if ids:
+            return super().fetch(namespace, ids=ids)
+        docs = self.indexed.get(namespace, {})
+        return {i: f for i, f in docs.items() if matches(f, filter)}
+
+
+async def test_a_fact_stated_this_turn_is_listed_before_the_index_catches_up():
+    facts = FactStore(LaggingBackend(), FakeEmbedder())
+    await facts.remember(
+        "a", "Works as a data analyst", "job_title", "data analyst", now=NOW
+    )
+    assert [f.value for f in await facts.list_active("a", now=NOW)] == ["data analyst"]
+    # another process (or a restart) has no ids of its own: it waits for the index
+    other = FactStore(facts.backend, FakeEmbedder())
+    assert not await other.list_active("a", now=NOW)
+    facts.backend.catch_up()
+    assert [f.value for f in await other.list_active("a", now=NOW)] == ["data analyst"]
+
+
+async def test_a_forgotten_or_superseded_fact_is_not_listed_from_a_stale_index():
+    facts = FactStore(LaggingBackend(), FakeEmbedder())
+    await facts.remember("a", "Manages Nordic", "work_region", "Nordic", now=NOW)
+    await facts.remember("a", "Likes tea", "drink", "tea", now=NOW)
+    facts.backend.catch_up()
+    await facts.remember("a", "Manages APAC", "work_region", "APAC", now=NOW)
+    await facts.forget("a", "drink")
+    # the stale index still says: Nordic is active, tea exists
+    assert [f.value for f in await facts.list_active("a", now=NOW)] == ["APAC"]
+    # and another user's ids are never read for this one
+    assert not await facts.list_active("b", now=NOW)
 
 
 async def test_a_recall_failure_is_an_empty_recall():
