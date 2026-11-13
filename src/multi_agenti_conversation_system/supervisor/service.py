@@ -33,6 +33,7 @@ from multi_agenti_conversation_system.guardrails.input_guard import Classificati
 from multi_agenti_conversation_system.llm import get_chat_model
 from multi_agenti_conversation_system.memory import sql_pairs
 from multi_agenti_conversation_system.memory.cache import SemanticCache
+from multi_agenti_conversation_system.memory.chats import ChatLog
 from multi_agenti_conversation_system.memory.checkpointer import open_memory
 from multi_agenti_conversation_system.memory.episodes import EpisodeStore
 from multi_agenti_conversation_system.memory.facts import FactStore
@@ -77,8 +78,10 @@ class TurnResult:
 
 
 class Supervisor:
-    def __init__(self, graph, context: SupervisorContext) -> None:
-        self.graph, self.context = graph, context
+    def __init__(
+        self, graph, context: SupervisorContext, chats: ChatLog | None = None
+    ) -> None:
+        self.graph, self.context, self.chats = graph, context, chats
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def ask(
@@ -165,6 +168,25 @@ class Supervisor:
                 for f in facts
             ],
         }
+
+    async def list_chats(self, user_id: str) -> list[dict[str, Any]]:
+        """The user's past chats, most recent first: {thread_id, title, updated_at, ...}."""
+        return await self.chats.list_chats(user_id) if self.chats else []
+
+    async def load_chat(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
+        """One of the user's chats as the UI showed it: [{role, content, meta}]."""
+        return await self.chats.load(user_id, thread_id) if self.chats else []
+
+    async def save_chat(
+        self, user_id: str, thread_id: str, messages: list[dict[str, Any]]
+    ) -> None:
+        """Store the chat as shown so far (replaces the earlier copy). Never raises."""
+        if self.chats is None or settings.EVAL_MODE:
+            return
+        try:
+            await self.chats.save(user_id, thread_id, messages)
+        except Exception as exc:  # noqa: BLE001 - losing the log must not lose the answer
+            logger.warning("save_chat failed: %s: %s", type(exc).__name__, exc)
 
     async def forget_fact(self, user_id: str, attribute: str) -> None:
         """ "Forget X": hard-delete the fact and its history."""
@@ -316,6 +338,6 @@ async def open_supervisor(
         )
         async with open_memory() as (saver, store):
             context.profiles = ProfileStore(store)
-            yield Supervisor(build_graph(saver), context)
+            yield Supervisor(build_graph(saver), context, chats=ChatLog(store))
     finally:
         await registry.close()

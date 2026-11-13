@@ -34,6 +34,7 @@ from multi_agenti_conversation_system.supervisor.service import (
 )
 
 DOMAINS = ["any", "sales", "customers", "products", "hr", "logistics"]
+CHATS_SHOWN = 20  # most recent first
 NODE_LABELS = {
     "input_guard": "Checking the message",
     "contextualize": "Making the question standalone",
@@ -134,20 +135,46 @@ ss.setdefault("thread_id", f"chat-{uuid.uuid4().hex[:8]}")
 ss.setdefault("messages", [])
 ss.setdefault("pending", None)  # a TurnResult dict waiting for approval
 ss.setdefault("memory_version", 0)
+ss.setdefault("dirty", False)  # the open chat has new turns since it was opened
+
+
+def leave_chat() -> None:
+    """The open conversation is over: if it has new turns, its summary becomes an episode."""
+    if ss.messages and ss.dirty:
+        be.call(supervisor.end_thread(ss.thread_id, ss.user_id), timeout=60)
+    ss.dirty = False
 
 
 def new_chat() -> None:
-    """End the conversation (its summary becomes an episode) and start a fresh thread."""
-    if ss.messages:
-        be.call(supervisor.end_thread(ss.thread_id, ss.user_id), timeout=60)
+    """End the conversation and start a fresh thread."""
+    leave_chat()
     ss.thread_id, ss.messages, ss.pending = f"chat-{uuid.uuid4().hex[:8]}", [], None
     ss.memory_version += 1
+
+
+def open_chat(thread_id: str) -> None:
+    """Reopen one of the user's past chats: its messages, and its checkpointed thread, so
+    the conversation continues where it stopped."""
+    leave_chat()
+    ss.messages = be.call(supervisor.load_chat(ss.user_id, thread_id), timeout=30)
+    ss.thread_id, ss.pending = thread_id, None
+    ss.memory_version += 1
+
+
+def save_chat() -> None:
+    """Store the chat as shown, so the user can find it again in the sidebar."""
+    ss.dirty = True
+    try:
+        be.call(supervisor.save_chat(ss.user_id, ss.thread_id, ss.messages), timeout=30)
+    except Exception as exc:  # noqa: BLE001 - the answer is on screen either way
+        st.warning(f"This chat could not be saved: {type(exc).__name__}")
 
 
 with st.sidebar:
     st.header("Session")
     user = st.text_input("User", ss.user_id, help="Memory is kept per user.")
     if user != ss.user_id and user.strip():
+        leave_chat()  # while ss.user_id is still the user the chat belongs to
         ss.user_id = user.strip()
         new_chat()
         st.rerun()
@@ -156,6 +183,27 @@ with st.sidebar:
     if st.button("New chat", use_container_width=True):
         new_chat()
         st.rerun()
+
+    st.header("Chats")
+    try:
+        chats = be.call(supervisor.list_chats(ss.user_id), timeout=30)
+    except Exception as exc:  # noqa: BLE001 - the sidebar must not take the page down
+        chats = []
+        st.warning(f"Chat history is unavailable: {type(exc).__name__}")
+    if not chats:
+        st.caption("Your past chats will be listed here.")
+    for c in chats[:CHATS_SHOWN]:
+        when = time.strftime("%d %b %H:%M", time.localtime(c["updated_at"]))
+        current = c["thread_id"] == ss.thread_id
+        if st.button(
+            f"{'▶ ' if current else ''}{c['title']}",
+            key=f"chat-{c['thread_id']}",
+            help=f"Last active {when}, {c['messages']} messages",
+            disabled=current or bool(ss.pending),
+            use_container_width=True,
+        ):
+            open_chat(c["thread_id"])
+            st.rerun()
 
     st.header("Memory")
     st.caption("What the assistant has learned about you. Used only for you.")
@@ -255,7 +303,7 @@ for i, m in enumerate(ss.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
         if m.get("meta"):
-            render_details(m["meta"], str(i))
+            render_details(m["meta"], f"{ss.thread_id}-{i}")
 
 if ss.pending:
     request = ss.pending["approval"]
@@ -284,6 +332,7 @@ if ss.pending:
         )
         if turn:
             add_answer(turn)
+        save_chat()
         st.rerun()
 
 if prompt := st.chat_input(
@@ -306,4 +355,5 @@ if prompt := st.chat_input(
         ss.pending = asdict(turn)
     elif turn:
         add_answer(turn)
+    save_chat()
     st.rerun()
