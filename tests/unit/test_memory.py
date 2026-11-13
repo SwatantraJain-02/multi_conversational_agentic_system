@@ -118,6 +118,17 @@ async def test_profile_store_round_trip_per_user():
     assert await store.load("alice") == {}
 
 
+async def test_a_user_id_with_a_dot_has_a_profile_of_its_own():
+    # store namespace labels may not contain '.': the id is escaped, never rejected
+    store = ProfileStore(InMemoryStore())
+    await store.set("swatantra.jain", "answer_length", "short")
+    await store.set("swatantra%2Ejain", "answer_length", "long")
+    assert profile_mod.values(await store.load("swatantra.jain")) == {
+        "answer_length": "short"
+    }
+    assert profile_mod.store_label("alice") == "alice"  # plain ids keep their key
+
+
 # --------------------------------------------------------------------------- facts
 @pytest.fixture
 def facts():
