@@ -1,12 +1,13 @@
 from pathlib import Path
 
+from psycopg.conninfo import make_conninfo
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings(BaseSettings):
-    """Application configuration, loaded from environment variables and the project-root .env file."""
+    """Application configuration, loaded from the project-root .env file."""
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
@@ -14,14 +15,162 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    OLLAMA_BASE_URL: str
-    CHAT_MODEL: str
-    EMBED_MODEL: str
-    TEMPERATURE: float
-    MODEL_REASONING: bool
+    # ---------------------------
+    # Database configuration (Aiven Postgres: one service, two databases)
+    # ---------------------------
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_SSLMODE: str = "require"
+    POSTGRES_ADMIN_USER: str = "avnadmin"
+    POSTGRES_ADMIN_PASSWORD: str
+    POSTGRES_ADMIN_DB: str = "defaultdb"
+    AGENT_APP_PASSWORD: str
+    AGENT_READONLY_PASSWORD: str
+    NORTHWIND_DB: str = "northwind"
+    MEMORY_DB: str = "agent_memory"
+    MAX_ROWS: int = 100
+
+    # ---------------------------
+    # Vector database configuration (Pinecone serverless)
+    # ---------------------------
+    PINECONE_API_KEY: str = ""
+    PINECONE_INDEX: str = "capstone"
+    PINECONE_CLOUD: str = "aws"
+    PINECONE_REGION: str = "us-east-1"
+
+    # ---------------------------
+    # LLM / model configuration (OpenRouter)
+    # ---------------------------
     OPENROUTER_API_KEY: str
-    CHROMADB_HOST: str
-    CHROMADB_PORT: int
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    CHAT_MODEL: str
+    JUDGE_MODEL: str = ""
+    EMBED_MODEL: str = "nvidia/nemotron-3.5-embed-8b:free"
+    # Nemotron embed models are trained with these prefixes (check against the model card).
+    EMBED_QUERY_PREFIX: str = "query: "
+    EMBED_DOC_PREFIX: str = "passage: "
+    # The free Nemotron endpoint fails ("service inference failed") on batches of real
+    # documents, so send one text per request by default (G18).
+    EMBED_BATCH_SIZE: int = 1
+    TEMPERATURE: float = 0.0
+    MODEL_REASONING: bool = False
+
+    # ---------------------------
+    # Langfuse (prompts, traces, evals)
+    # ---------------------------
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_BASE_URL: str = "https://cloud.langfuse.com"
+    PROMPT_LABEL: str = "production"
+    # How long a fetched prompt is reused before Langfuse is asked again: a prompt promoted
+    # in the UI reaches the running agents within this many seconds.
+    PROMPT_CACHE_TTL_S: int = 60
+    # Keep these small: a bad key or an outage must not stall an agent for long.
+    PROMPT_FETCH_TIMEOUT_S: int = 3
+    # Off in unit tests and offline runs. Tracing is also off when the keys are empty.
+    TRACING_ENABLED: bool = True
+
+    # ---------------------------
+    # MCP configuration
+    # ---------------------------
+    DB_MCP_HOST: str = "localhost"
+    DB_MCP_PORT: int = 5555
+    DB_MCP_TOKEN: str
+
+    # ---------------------------
+    # Web search (Web MCP server)
+    # ---------------------------
+    TAVILY_API_KEY: str = ""
+    WEB_MCP_HOST: str = "localhost"
+    WEB_MCP_PORT: int = 5556
+    WEB_MCP_TOKEN: str = ""
+    # Token buckets per tool: sustained rate per minute and burst size.
+    WEB_SEARCH_PER_MIN: int = 10
+    WEB_SEARCH_BURST: int = 5
+    WEB_FETCH_PER_MIN: int = 30
+    WEB_FETCH_BURST: int = 10
+
+    # ---------------------------
+    # A2A agents (each its own service; the supervisor is the A2A client)
+    # ---------------------------
+    A2A_HOST: str = "localhost"
+    # One static bearer token shared by every agent (same model as the MCP servers).
+    A2A_TOKEN: str = ""
+    # Default per-call deadline; a TaskRequest's constraints.timeout_s overrides it.
+    A2A_TIMEOUT_S: float = 60.0
+    SQL_AGENT_PORT: int = 7001
+    WEB_AGENT_PORT: int = 7002
+    SYNTHESIS_AGENT_PORT: int = 7003
+    ECHO_AGENT_PORT: int = 7009  # plumbing test agent (Phase C)
+
+    # ---------------------------
+    # SQL agent
+    # ---------------------------
+    # Human approval is asked when the query touches PII, or when its estimated row count
+    # reaches this value. The server clamps every query to MAX_ROWS before EXPLAIN, so the
+    # estimate never exceeds MAX_ROWS: keep this at or below it ("the result would be cut off").
+    SQL_APPROVAL_ROWS: int = 100
+    # Self-correction: how many times a failed query may be regenerated (1 + this many attempts).
+    SQL_MAX_RETRIES: int = 2
+    # No cache reads or writes and no writes to shared memory (learned SQL pairs). Smoke
+    # tests and evals turn this on.
+    EVAL_MODE: bool = False
+    # ---------------------------
+    # Long-term memory and the semantic cache (Phase H)
+    # ---------------------------
+    # Bump by hand when the business data changes (a reload, a new quarter): every cached
+    # DB answer written under another value stops matching.
+    DATA_VERSION: str = "1"
+    # Cosine similarity a cached question must reach. scripts/calibrate_cache.py measured
+    # Nemotron: paraphrases 0.79-0.96, different questions about one entity up to 0.85.
+    # 0.87 trades a few paraphrase misses for no wrong hit (a wrong hit is the worse error).
+    CACHE_THRESHOLD: float = 0.87
+    CACHE_TTL_WEB_S: int = 24 * 3600
+    CACHE_TTL_DB_S: int = (
+        7 * 24 * 3600
+    )  # a backstop: DATA_VERSION is the real invalidation
+    # Memory retrieval (see the memory guide in the plan): top-k and minimum similarity.
+    FACTS_TOP_K: int = 3
+    # Nemotron scores a relevant fact at 0.21-0.62 and an unrelated one at <= 0.12
+    # (scripts/calibrate_cache.py), far below the 0.75 a stronger model would use.
+    FACTS_MIN_SIMILARITY: float = 0.18
+    EPISODES_TOP_K: int = 2
+    EPISODES_MIN_SIMILARITY: float = 0.25
+    EPISODE_EVERY_N_TURNS: int = 5
+    FACTS_MAX_PER_USER: int = 200
+    # Discovery: the registry fetches each URL's agent card. JSON list in .env.
+    AGENT_URLS: list[str] = [
+        "http://localhost:7001",
+        "http://localhost:7002",
+        "http://localhost:7003",
+    ]
+
+    def _conninfo(self, dbname: str, user: str, password: str) -> str:
+        return make_conninfo(
+            host=self.POSTGRES_HOST,
+            port=self.POSTGRES_PORT,
+            dbname=dbname,
+            user=user,
+            password=password,
+            sslmode=self.POSTGRES_SSLMODE,
+        )
+
+    @property
+    def northwind_conninfo(self) -> str:
+        return self._conninfo(
+            self.NORTHWIND_DB, "agent_readonly", self.AGENT_READONLY_PASSWORD
+        )
+
+    @property
+    def memory_conninfo(self) -> str:
+        return self._conninfo(self.MEMORY_DB, "agent_app", self.AGENT_APP_PASSWORD)
+
+    def admin_conninfo(self, dbname: str | None = None) -> str:
+        return self._conninfo(
+            dbname or self.POSTGRES_ADMIN_DB,
+            self.POSTGRES_ADMIN_USER,
+            self.POSTGRES_ADMIN_PASSWORD,
+        )
 
 
 settings = Settings()
