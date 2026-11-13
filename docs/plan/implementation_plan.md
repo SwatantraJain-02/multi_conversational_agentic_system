@@ -73,7 +73,7 @@
 
 **Storage split (for the report):**
 - **Aiven `northwind`:** business data, reached only through `agent_readonly` by the DB MCP server.
-- **Aiven `agent_memory`:** checkpoints for the supervisor and SQL agent, plus the profile store, as `agent_app`.
+- **Aiven `agent_memory`:** checkpoints for the supervisor and SQL agent, plus the store that holds the profile and the chat log, as `agent_app`.
 - **Pinecone:** every vector, one namespace each.
 - **Langfuse:** prompts, traces, datasets and scores. Nothing here is memory.
 
@@ -603,6 +603,7 @@ None of these is a CS3 minimum demo.
 | **Long-term episodic: summaries** | what *happened* in a past thread: goal, findings, outcome, date | Pinecone ns `episodes`, `kind=summary`, id = `thread_id` | `write_episode`: every 5 turns and when the thread ends; upserted, one per thread | 90-day retention or a cap of 50 per user; recency-weighted | `load_context`: top 2, similarity ≥ 0.70 | "Relevant past interactions" in `planner` only (~200) |
 | **Long-term episodic: SQL pairs** | standalone question → validated SQL, tables, domain | Pinecone ns `episodes`, `kind=sql_pair`, **`scope=global`** (shared across users) | `write_sql_pair`: only after a successful run that HITL didn't reject; **skipped if the SQL touches PII columns** | dedupe by similarity ≥ 0.95 plus a sqlglot-normalised SQL fingerprint; `schema_version`, so pairs are dropped when the schema changes; a thumbs-down deletes | SQL Agent `retrieve_schema`: hybrid search, then RRF with the seed few-shots, top 3 | "Examples" in `generate_sql` (~600) |
 | **Semantic cache** | finished answers | Pinecone ns `semantic_cache`: `route`, `entity_key`, `profile_hash`, `data_version`, `expires_at` (epoch int, so `$gt` works), `prompt_version` | `write_cache`: only for complete, successful, standalone answers that weren't direct chit-chat or HITL | TTL (web ≈ 24h, DB until `data_version` changes); expired entries swept on read; a thumbs-down deletes | `check_cache`: exact-filter match (incl. `prompt_version`) **plus** similarity ≥ the calibrated threshold | **never injected**: the answer is returned as-is |
+| *Chat log* (a record for the user, not memory the model reads; added 13 Nov) | every chat as the UI showed it: title (first question), start and last-activity times, messages with their answer details (sources, SQL, prompt versions); bulky per-step results dropped | LangGraph `AsyncPostgresStore`, `("chats", user_id)`, key `thread_id` (`memory/chats.py`) | the UI, after every turn, through `Supervisor.save_chat` (off in `EVAL_MODE`) | replaced whole on each save; nothing trims it, unlike the checkpoint | the UI sidebar's **Chats** list; reopening a chat restores its messages and its `thread_id`, so the checkpoint continues | **never injected** |
 | *Seed knowledge* (not memory, but often confused with it) | schema docs, seed few-shots | Pinecone ns `schema_docs`, `sql_seed_examples` | offline by `build_schema_index.py` | rebuilt when the YAML changes | DB MCP tools `search_schema` / `get_few_shots` (hybrid) | SQL prompt (~1k) |
 
 ### Pairs that are easy to confuse
@@ -613,6 +614,7 @@ None of these is a CS3 minimum demo.
   - Facts are **open-ended statements about the user**. They're unbounded, so only the **relevant** few are retrieved by similarity.
 - **Semantic vs episodic:** semantic memory is *what is true*, distilled and kept current. Episodic memory is *what happened*: dated events and worked examples.
 - **Episodic SQL pairs vs the cache.** The cache returns a **finished answer** and skips everything. An SQL pair only helps the model **write the SQL**, and the query still runs against live data.
+- **Conversation (checkpoint) vs chat log.** The checkpoint is the model's *working* memory of one thread: trimmed into a summary, keyed by thread only. The chat log is the *user's* record of every chat, complete and listed per user, and the model never reads it.
 
 ### How memory changes over time
 **Routing rule.** The write step sorts each user statement into one of three kinds, so nothing is stored twice:
