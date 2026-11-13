@@ -61,6 +61,11 @@ class Backend:
         self.supervisor: Supervisor | None = None
         self.error: Exception | None = None
         self._ready = threading.Event()
+        # Held here so the serving task stays reachable. asyncio keeps only weak references to
+        # tasks; with nothing else holding it, the garbage collector destroys the task ("Task
+        # was destroyed but it is pending!") and closes the supervisor's Postgres pool and A2A
+        # clients while the page still uses them, so every turn then fails at once.
+        self._stop = asyncio.Event()
         asyncio.run_coroutine_threadsafe(self._serve(), self.loop)
         self._ready.wait(timeout=120)
 
@@ -69,7 +74,7 @@ class Backend:
             async with open_supervisor() as supervisor:
                 self.supervisor = supervisor
                 self._ready.set()
-                await asyncio.Event().wait()  # keep it open until the process ends
+                await self._stop.wait()  # keep it open until the process ends
         except Exception as exc:  # noqa: BLE001 - shown on the page
             self.error = exc
             self._ready.set()
