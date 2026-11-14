@@ -20,6 +20,13 @@ class SQLGeneration(BaseModel):
         default=None,
         description="Set (and sql left empty) when the request needs a write or can't be answered from this database",
     )
+    clarification: str | None = Field(
+        default=None,
+        description="Set (and sql left empty) to ask the user ONE question when a detail only they can give changes the query",
+    )
+    options: list[str] = Field(
+        default_factory=list, description="With clarification: 2 to 4 likely answers"
+    )
 
 
 class SqlState(TypedDict, total=False):
@@ -40,6 +47,9 @@ class SqlState(TypedDict, total=False):
     error: str  # why the last attempt failed; "" when it didn't
     failed_sql: str
     refused: str  # the model's refusal (writes, off-topic); "" otherwise
+    # --- a clarifying question (HITL): the payload while it waits, how many were asked
+    clarify: dict[str, Any] | None
+    clarified: int
     # --- approval (HITL)
     est_rows: int
     pii_columns: list[str]

@@ -523,3 +523,64 @@ async def test_sql_mistakes_and_statement_timeouts_go_back_to_the_model(error):
     state, _ = await run(graph, ctx)
     assert state["attempts"] == 2 and db.ran == [GOOD, FIXED]
     assert error.split(":")[0] in "\n".join(m["content"] for m in model.seen[1])
+
+
+# ------------------------------------------------------------ a clarifying question
+def asks(question="Best by revenue or by number of orders?"):
+    return SQLGeneration(
+        sql="", clarification=question, options=["By revenue", "By order count"]
+    )
+
+
+async def test_the_model_can_ask_one_question_and_writes_the_query_with_the_answer():
+    model = ScriptedModel(asks(), gen(GOOD))
+    graph, ctx, db, pairs = make(model)
+    out, config = await run(graph, ctx, request("Who is our best customer?"))
+    payload = out["__interrupt__"][0].value
+    assert payload["kind"] == "clarify" and payload["options"] == [
+        "By revenue",
+        "By order count",
+    ]
+    assert payload["question"] == "Best by revenue or by number of orders?"
+    assert db.explained == [] and db.ran == []  # nothing ran while it waited
+
+    state = await graph.ainvoke(
+        Command(resume={"answer": "By revenue"}), config, context=ctx
+    )
+    assert db.ran == [GOOD] and state["clarified"] == 1
+    second = model.seen[1][-1]["content"]
+    assert "The user answered: By revenue" in second
+    assert pairs.written == []  # a clarified question is not learned
+    assert to_result(state, request()).ok
+
+
+async def test_a_second_question_counts_as_a_failed_attempt():
+    model = ScriptedModel(asks(), asks("And which year?"), gen(GOOD))
+    graph, ctx, db, _ = make(model)
+    _out, config = await run(graph, ctx)
+    state = await graph.ainvoke(Command(resume={"answer": ""}), config, context=ctx)
+    assert "__interrupt__" not in state and db.ran == [GOOD]
+    assert "assumption" in model.seen[1][-1]["content"]  # no answer: assume
+    assert "do not ask again" in model.seen[2][-1]["content"]
+
+
+async def test_a_question_then_an_approval_on_the_same_task():
+    model = ScriptedModel(asks(), gen(PII_SQL, ("customers",)))
+    graph, ctx, db, _ = make(model, pii_db())
+    out, config = await run(graph, ctx)
+    assert out["__interrupt__"][0].value["kind"] == "clarify"
+    out = await graph.ainvoke(
+        Command(resume={"answer": "German customers"}), config, context=ctx
+    )
+    assert out["__interrupt__"][0].value["kind"] == "approval"
+    await resume(graph, ctx, config, approved=True)
+    assert db.ran == [PII_SQL]
+
+
+async def test_a_new_task_in_the_same_context_may_ask_again():
+    model = ScriptedModel(asks(), gen(GOOD), asks())
+    graph, ctx, *_ = make(model)
+    _out, config = await run(graph, ctx)
+    await graph.ainvoke(Command(resume={"answer": "x"}), config, context=ctx)
+    out, _ = await run(graph, ctx)
+    assert out["__interrupt__"][0].value["kind"] == "clarify"

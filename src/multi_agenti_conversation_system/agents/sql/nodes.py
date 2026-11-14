@@ -1,9 +1,9 @@
 """The SQL agent's graph nodes and the routing between them.
 
     retrieve_schema -> generate_sql -> validate -> approval_check -> [hitl_gate] -> execute
-                           ^              |             |                            |
-                           +--------------+-------------+--------- (error) ----------+
-                                                                                     v
+                        ^  |  ^           |             |                            |
+       clarify_gate <---+--+  +-----------+-------------+--------- (error) ----------+
+       (a question to the user)                                                      v
                                                               explain_result -> write_sql_pair
 
 Self-correction: a failure in validate, approval_check (EXPLAIN) or execute goes back to
@@ -15,6 +15,11 @@ refuses to run a query that needs approval but isn't the approved one.
 
 `hitl_gate` does nothing but `interrupt()`: resuming re-runs the whole node (G22), so any
 side effect would repeat. The EXPLAIN call lives in the node before it.
+
+Instead of guessing, the model may ask the user one question (`clarification`, see `hitl`):
+`clarify_gate` interrupts with it and adds the answer to the question, then generate_sql
+runs again. Once asked, a second question counts as a failed attempt. A clarified question
+is not learned as a pair: it is not the question the next user will type.
 
 Nodes get everything from `runtime.context` (a `SqlContext`), and raise `AgentError` for
 conditions the caller should see (a dependency is down).
@@ -28,7 +33,7 @@ from langgraph.graph import END
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
-from multi_agenti_conversation_system import tracing
+from multi_agenti_conversation_system import hitl, tracing
 from multi_agenti_conversation_system.a2a.contracts import AgentError
 from multi_agenti_conversation_system.agents.sql.context import Messages, SqlContext
 from multi_agenti_conversation_system.agents.sql.db_tools import is_db_down
@@ -142,9 +147,32 @@ async def generate_sql(state: SqlState, runtime: Rt) -> dict[str, Any]:
     }
     if generation.refusal and not sql:
         update["refused"] = generation.refusal
+    elif generation.clarification and not sql:
+        if state.get("clarified", 0) < hitl.MAX_CLARIFICATIONS:
+            update["clarify"] = hitl.clarify_payload(
+                generation.clarification, generation.options
+            )
+        else:
+            update["error"] = (
+                "you already asked the user a question; do not ask again: write the "
+                "query with a reasonable assumption and say it in the explanation"
+            )
     elif not sql:
         update["error"] = "the model returned no SQL"
     return update
+
+
+def clarify_gate(state: SqlState) -> dict[str, Any]:
+    """Ask the user. Only interrupt() and pure state after it: resuming re-runs it (G22)."""
+    payload = state["clarify"]
+    answer = hitl.answer_of(interrupt(payload))
+    return {
+        "question": hitl.with_clarification(
+            state["question"], payload["question"], answer
+        ),
+        "clarify": None,
+        "clarified": state.get("clarified", 0) + 1,
+    }
 
 
 async def validate(state: SqlState, runtime: Rt) -> dict[str, Any]:
@@ -195,6 +223,7 @@ def hitl_gate(state: SqlState) -> dict[str, Any]:
     """Pause for a human. Only interrupt() here: resuming re-runs this whole node (G22)."""
     decision = interrupt(
         {
+            "kind": hitl.APPROVAL,
             "sql": state["sql"],
             "reason": f"Approval needed: {state['approval_reason']}.",
             "est_rows": state.get("est_rows", 0),
@@ -262,6 +291,7 @@ async def write_sql_pair(state: SqlState, runtime: Rt) -> dict[str, Any]:
     if (
         state.get("pii_columns")
         or state.get("requires_approval")
+        or state.get("clarified")
         or not state.get("row_count")
     ):
         return {"learned_pair": None}
@@ -297,7 +327,9 @@ def _retry_or_fail(state: SqlState) -> str:
 
 
 def after_generate(state: SqlState) -> str:
-    return END if state.get("refused") else "validate"
+    if state.get("refused"):
+        return END
+    return "clarify_gate" if state.get("clarify") else "validate"
 
 
 def after_validate(state: SqlState) -> str:
