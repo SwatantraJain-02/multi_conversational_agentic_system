@@ -96,6 +96,28 @@ class Runner:
             await asyncio.sleep(POLL_EVERY_S)
         return None
 
+    async def _turn(
+        self, thread: str, user: str, text: str, trace_ctx: dict[str, str]
+    ) -> tuple[Any, bool, list[str]]:
+        """Ask, and settle every pause. The eval user is not there: it declines every
+        approval (nothing leaves the DB) and skips every question (the agent assumes and
+        says so). A question can be followed by an approval, so this is a loop, bounded.
+        Returns the final turn, whether an approval was asked, and the questions asked."""
+        sup = self.supervisor
+        turn = await sup.ask(thread, user, text, trace_ctx=trace_ctx)
+        approval, questions = False, []
+        for _ in range(MAX_PAUSES):
+            if turn.status == "needs_approval":
+                approval = True
+                reply: dict[str, Any] = {"approved": False}
+            elif turn.status == "needs_clarification":
+                questions.append(turn.clarification.get("question", ""))
+                reply = {"answer": ""}
+            else:
+                break
+            turn = await sup.resume(thread, user_id=user, trace_ctx=trace_ctx, **reply)
+        return turn, approval, questions
+
     async def case(
         self, inp: dict[str, Any], trace_ctx: dict[str, str]
     ) -> dict[str, Any]:
@@ -106,32 +128,16 @@ class Runner:
         settings.EVAL_MODE = not cache_case  # the cache is off in EVAL_MODE
         try:
             for i, message in enumerate(inp.get("setup", [])):
-                await sup.ask(f"{user}-setup{i}", user, message, trace_ctx=trace_ctx)
+                await self._turn(f"{user}-setup{i}", user, message, trace_ctx)
             if inp.get("setup"):  # a fresh write is not instantly searchable (G14)
                 await self._poll(lambda: _learned(ctx, user, inp["question"]))
             if inp.get("prime"):
-                await sup.ask(f"{user}-prime", user, inp["prime"], trace_ctx=trace_ctx)
+                await self._turn(f"{user}-prime", user, inp["prime"], trace_ctx)
                 await self._poll(lambda: _cached(sup, inp["prime"]))
             started = time.monotonic()
-            turn = await sup.ask(
-                f"{user}-main", user, inp["question"], trace_ctx=trace_ctx
+            turn, approval, questions = await self._turn(
+                f"{user}-main", user, inp["question"], trace_ctx
             )
-            # The eval user is not there: it declines every approval (nothing leaves the
-            # DB) and skips every question (the agent assumes and says so). A question can
-            # be followed by an approval, so this is a loop, bounded.
-            approval, questions = False, []
-            for _ in range(MAX_PAUSES):
-                if turn.status == "needs_approval":
-                    approval = True
-                    reply: dict[str, Any] = {"approved": False}
-                elif turn.status == "needs_clarification":
-                    questions.append(turn.clarification.get("question", ""))
-                    reply = {"answer": ""}
-                else:
-                    break
-                turn = await sup.resume(
-                    f"{user}-main", user_id=user, trace_ctx=trace_ctx, **reply
-                )
             output = asdict(turn)
             output.update(
                 approval_requested=approval,
