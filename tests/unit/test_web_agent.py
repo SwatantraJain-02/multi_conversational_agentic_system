@@ -7,6 +7,7 @@ checked in code, and per-task isolation inside one A2A context.
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from multi_agenti_conversation_system.a2a.contracts import AgentError, TaskRequest
 from multi_agenti_conversation_system.agents.web import nodes
@@ -395,3 +396,52 @@ async def test_a_short_snippet_is_still_used_when_no_page_can_be_read():
     graph, ctx = make(web, Model(plan("q"), answer="Sales rose [1]."))
     out = to_result(await run(graph, ctx), request())
     assert out.data["confidence"] == "low" and [c["n"] for c in out.citations] == [1]
+
+
+# ------------------------------------------------------------ a clarifying question
+class PlansInOrder(Model):
+    def __init__(self, *plans):
+        super().__init__()
+        self.plans = list(plans)
+
+    async def plan(self, messages):
+        self.plan_seen.append(messages)
+        return self.plans.pop(0)
+
+
+def asks(question="Jaguar the car maker or the animal?"):
+    return SearchPlan(queries=[], clarification=question, options=["Car", "Animal"])
+
+
+async def test_the_planner_can_ask_one_question_then_searches_with_the_answer():
+    web = FakeWeb({"jaguar cars sales": [result("https://a.com/1")]})
+    model = PlansInOrder(asks(), plan("jaguar cars sales"))
+    graph, ctx = make(web, model)
+    config = {"configurable": {"thread_id": "t1"}}
+    out = await graph.ainvoke(build_input(request("Jaguar news?")), config, context=ctx)
+    payload = out["__interrupt__"][0].value
+    assert payload["kind"] == "clarify" and payload["options"] == ["Car", "Animal"]
+    assert web.searched == []  # nothing searched while it waited
+
+    state = await graph.ainvoke(Command(resume={"answer": "Car"}), config, context=ctx)
+    assert [q for q, *_ in web.searched] == ["jaguar cars sales"]
+    assert "The user answered: Car" in model.plan_seen[1][-1]["content"]
+    assert to_result(state, request()).ok and state["clarified"] == 1
+
+
+class AnyQuery(dict):
+    """Every query finds nothing."""
+
+    def __missing__(self, key):
+        return []
+
+
+async def test_a_second_question_is_ignored_and_the_question_is_searched():
+    web = FakeWeb(AnyQuery())
+    model = PlansInOrder(asks(), asks("Which year?"))
+    graph, ctx = make(web, model)
+    config = {"configurable": {"thread_id": "t1"}}
+    await graph.ainvoke(build_input(request("Jaguar news?")), config, context=ctx)
+    state = await graph.ainvoke(Command(resume={"answer": ""}), config, context=ctx)
+    assert "__interrupt__" not in state and len(web.searched) == 1
+    assert web.searched[0][0].startswith("Jaguar news?")  # the question, as a query

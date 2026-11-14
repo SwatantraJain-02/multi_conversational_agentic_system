@@ -14,6 +14,13 @@ class SearchPlan(BaseModel):
     )
     recency: Literal["day", "week", "month", "year", "any"] = "any"
     topic: Literal["general", "news"] = "general"
+    clarification: str | None = Field(
+        default=None,
+        description="Only when the question can't be searched well without ONE detail only the user can give: the question to ask them (queries may then be empty)",
+    )
+    options: list[str] = Field(
+        default_factory=list, description="With clarification: 2 to 4 likely answers"
+    )
 
 
 # The fan-out nodes (search_one, fetch_one) each return a one-item list; `operator.add`
@@ -24,6 +31,9 @@ Accumulated = Annotated[list[Any], operator.add]
 
 class WebState(TypedDict, total=False):
     question: str
+    # --- a clarifying question (HITL): the payload while it waits, how many were asked
+    clarify: dict[str, Any] | None
+    clarified: int
     # --- planning and search
     queries: list[str]
     recency: str

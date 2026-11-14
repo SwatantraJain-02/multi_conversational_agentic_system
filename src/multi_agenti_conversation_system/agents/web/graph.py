@@ -29,6 +29,7 @@ RETRY = RetryPolicy(max_attempts=2, initial_interval=0.5, retry_on=_transient)
 def build_graph(checkpointer):
     graph = StateGraph(WebState, context_schema=WebContext)
     graph.add_node("plan_queries", nodes.plan_queries)
+    graph.add_node("clarify_gate", nodes.clarify_gate)
     graph.add_node("search_one", nodes.search_one, retry_policy=RETRY)
     graph.add_node("merge_dedupe", nodes.merge_dedupe)
     graph.add_node("fetch_one", nodes.fetch_one, retry_policy=RETRY)
@@ -39,7 +40,10 @@ def build_graph(checkpointer):
     graph.add_node("no_results", nodes.no_results)
 
     graph.add_edge(START, "plan_queries")
-    graph.add_conditional_edges("plan_queries", nodes.fan_out_search, ["search_one"])
+    graph.add_conditional_edges(
+        "plan_queries", nodes.route_after_plan, ["search_one", "clarify_gate"]
+    )
+    graph.add_edge("clarify_gate", "plan_queries")
     graph.add_edge("search_one", "merge_dedupe")
     graph.add_conditional_edges(
         "merge_dedupe", nodes.route_after_merge, ["fetch_one", "no_results"]
@@ -61,6 +65,8 @@ def build_input(request: TaskRequest) -> dict[str, Any]:
     A2A context left in the checkpoint."""
     return {
         "question": request.task,
+        "clarify": None,
+        "clarified": 0,
         "queries": [],
         "recency": "any",
         "topic": "general",
