@@ -54,6 +54,9 @@ from multi_agenti_conversation_system.supervisor.service import open_supervisor
 logger = logging.getLogger(__name__)
 RESULTS = Path("results")
 POLL_S, POLL_EVERY_S = 90, 3
+MAX_PAUSES = (
+    4  # approvals and questions answered per case (a question, then an approval, ...)
+)
 
 
 class Runner:
@@ -113,17 +116,26 @@ class Runner:
             turn = await sup.ask(
                 f"{user}-main", user, inp["question"], trace_ctx=trace_ctx
             )
-            approval = False
-            if (
-                turn.status == "needs_approval"
-            ):  # the eval user declines: nothing leaves the DB
-                approval = True
+            # The eval user is not there: it declines every approval (nothing leaves the
+            # DB) and skips every question (the agent assumes and says so). A question can
+            # be followed by an approval, so this is a loop, bounded.
+            approval, questions = False, []
+            for _ in range(MAX_PAUSES):
+                if turn.status == "needs_approval":
+                    approval = True
+                    reply: dict[str, Any] = {"approved": False}
+                elif turn.status == "needs_clarification":
+                    questions.append(turn.clarification.get("question", ""))
+                    reply = {"answer": ""}
+                else:
+                    break
                 turn = await sup.resume(
-                    f"{user}-main", approved=False, user_id=user, trace_ctx=trace_ctx
+                    f"{user}-main", user_id=user, trace_ctx=trace_ctx, **reply
                 )
             output = asdict(turn)
             output.update(
                 approval_requested=approval,
+                clarifications_asked=questions,
                 latency_ms=round((time.monotonic() - started) * 1000),
                 error=None,
             )
