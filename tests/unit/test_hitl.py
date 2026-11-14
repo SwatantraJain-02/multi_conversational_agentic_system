@@ -9,6 +9,8 @@ from multi_agenti_conversation_system import hitl
 from multi_agenti_conversation_system.a2a.contracts import TaskResult
 from multi_agenti_conversation_system.guardrails.input_guard import Classification
 from multi_agenti_conversation_system.memory.cache import cacheable
+from multi_agenti_conversation_system.supervisor.plan import validate_plan
+from multi_agenti_conversation_system.supervisor.state import RouteDecision
 
 ASKING = TaskResult(
     status="input_required",
@@ -152,3 +154,74 @@ async def test_an_approval_after_a_question_on_the_same_task_is_still_an_approva
         {"approved": True},
     ]
     assert turn.answer == "Names listed."
+
+
+# ------------------------------------------------------------ the planner's own question
+def clarify(question="Which currency should I convert the revenue to?"):
+    return RouteDecision(
+        intent="clarify", plan=[], question=question, options=["EUR", "GBP"]
+    )
+
+
+def test_a_clarify_plan_needs_a_question_and_no_steps():
+    caps = [{"agent": "sql", "skill": "answer_sql_question"}]
+    assert validate_plan(clarify(), caps) is None
+    assert "needs the question" in validate_plan(clarify(question=" "), caps)
+    with_steps = RouteDecision(
+        intent="clarify", plan=[step("s1", "sql")], question="Which?"
+    )
+    assert "empty plan" in validate_plan(with_steps, caps)
+    assert "already asked" in validate_plan(clarify(), caps, may_clarify=False)
+
+
+async def test_the_planner_asks_and_plans_again_with_the_answer():
+    registry = FakeRegistry({"sql": done("sql", "Revenue was EUR 1.2M.")})
+    planner = Planner(clarify(), decision("sql", step("s1", "sql", "Revenue in EUR?")))
+    sup, *_ = make(registry, planner)
+    paused = await sup.ask("t", "u", "Convert that revenue")
+    assert paused.status == "needs_clarification" and registry.calls == []
+    assert paused.clarification == {
+        "kind": "clarify",
+        "question": "Which currency should I convert the revenue to?",
+        "options": ["EUR", "GBP"],
+        "reason": "Which currency should I convert the revenue to?",
+        "step_id": "",
+        "agent": "supervisor",
+    }
+
+    turn = await sup.resume("t", answer="EUR")
+    assert turn.status == "answered" and turn.answer == "Revenue was EUR 1.2M."
+    replanned = planner.seen[1][-1]["content"]
+    assert (
+        "You asked: Which currency" in replanned
+        and "The user answered: EUR" in replanned
+    )
+    assert registry.resumes == []  # the planner's question is not an agent's task
+
+
+async def test_the_planner_asks_at_most_once_per_turn():
+    planner = Planner(clarify(), clarify("Which year?"), decision("direct"))
+    sup, *_ = make(FakeRegistry(), planner)
+    await sup.ask("t", "u", "Convert that revenue")
+    turn = await sup.resume("t", answer="")
+    assert turn.status == "answered" and len(planner.seen) == 3
+    assert "do not ask again" in planner.seen[1][-1]["content"]
+    assert "assumption" in planner.seen[1][-1]["content"]  # no answer: assume
+
+
+async def test_a_direct_answer_sees_the_clarification():
+    sup, direct, _ = make(FakeRegistry(), Planner(clarify(), decision("direct")))
+    await sup.ask("t", "u", "Convert 100 dollars")
+    await sup.resume("t", answer="EUR")
+    assert "The user answered: EUR" in direct.seen[0][-1]["content"]
+
+
+async def test_the_next_turn_starts_with_no_clarifications():
+    planner = Planner(clarify(), decision("direct"))
+    sup, *_ = make(FakeRegistry(), planner)
+    await sup.ask("t", "u", "Convert that revenue")
+    await sup.resume("t", answer="EUR")
+    planner.outputs = [decision("direct")]
+    await sup.ask("t", "u", "thanks")
+    values = (await sup.graph.aget_state(sup._config("t"))).values
+    assert values["clarifications"] == [] and values["pending_question"] is None

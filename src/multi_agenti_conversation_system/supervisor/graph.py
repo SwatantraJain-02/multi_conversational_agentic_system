@@ -25,6 +25,8 @@ def build_graph(checkpointer):
     graph.add_node("run_step", nodes.run_step)
     graph.add_node("hitl_gate", nodes.hitl_gate)
     graph.add_node("resume_dispatch", nodes.resume_dispatch)
+    graph.add_node("clarify_gate", nodes.clarify_gate)
+    graph.add_node("apply_clarification", nodes.apply_clarification)
     graph.add_node("finalize", nodes.finalize)
     graph.add_node("direct_answer", nodes.direct_answer)
     graph.add_node("summarize_history", nodes.summarize_history)
@@ -44,8 +46,10 @@ def build_graph(checkpointer):
     graph.add_conditional_edges(
         "supervisor",
         nodes.route_after_supervisor,
-        ["run_step", "hitl_gate", "direct_answer", "finalize"],
+        ["run_step", "hitl_gate", "clarify_gate", "direct_answer", "finalize"],
     )
+    graph.add_edge("clarify_gate", "apply_clarification")
+    graph.add_edge("apply_clarification", "planner")
     graph.add_edge("run_step", "supervisor")
     graph.add_edge("hitl_gate", "resume_dispatch")
     graph.add_edge("resume_dispatch", "supervisor")
@@ -85,6 +89,7 @@ def turn_input(
         "intent": "",
         "plan": [],
         "plan_error": "",
+        "pending_question": None,
         "ready": [],
         "dispatched": [],
         "dispatch_count": 0,

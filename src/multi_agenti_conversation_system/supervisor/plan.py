@@ -24,13 +24,28 @@ SYNTHESIS_AGENT = "synthesis"
 
 
 def validate_plan(
-    decision: RouteDecision, capabilities: list[dict[str, Any]]
+    decision: RouteDecision,
+    capabilities: list[dict[str, Any]],
+    *,
+    may_clarify: bool = True,
 ) -> str | None:
     """None if the plan is acceptable, otherwise one sentence saying what is wrong
-    (it is shown to the model so it can fix the plan)."""
+    (it is shown to the model so it can fix the plan). `may_clarify` is False once the
+    turn's question to the user has been asked: then the model must plan."""
     offered = {(c["agent"], c["skill"]) for c in capabilities}
     if decision.intent == "direct":
         return "a direct answer takes an empty plan" if decision.plan else None
+    if decision.intent == "clarify":
+        if not may_clarify:
+            return (
+                "you have already asked the user a question this turn; do not ask "
+                "again: plan with a reasonable assumption, and the answer will state it"
+            )
+        if decision.plan:
+            return "intent clarify takes an empty plan"
+        if not decision.question.strip():
+            return "intent clarify needs the question to ask, in `question`"
+        return None
     if not decision.plan:
         return f"intent '{decision.intent}' needs at least one step"
     if len(decision.plan) > MAX_STEPS:

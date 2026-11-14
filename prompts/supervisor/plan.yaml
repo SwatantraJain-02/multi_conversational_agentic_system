@@ -1,7 +1,7 @@
 # Local fallback and seed for the Langfuse prompt "supervisor/plan" (supervisor, planner node).
 # Variables: capabilities, history, question, domain, feedback.
 type: chat
-commit_message: "Route requests to change data to the sql agent, which refuses them with a flag"
+commit_message: "Ask the user one question (intent clarify) when a missing detail changes the answer"
 prompt:
   - role: system
     content: |
@@ -34,6 +34,14 @@ prompt:
         as a refusal and nothing is run. This applies only to requests to change data;
         questions that merely mention such a word (e.g. "how many orders were deleted")
         are planned as usual.
+      - A request that can't be answered well without ONE detail only the user can give,
+        where the choice really changes the answer and nothing settles it (not the
+        conversation, not the user's preferences, not an obvious default): intent
+        "clarify", an EMPTY plan, `question` = one short question, and `options` = 2 to 4
+        likely answers. Example: "convert that revenue" with no target currency. Do NOT
+        ask when a sensible default exists (the latest year, all regions, the top 10):
+        plan with it, and the answer will say what was assumed. Never ask about something
+        an agent can look up.
 
       Rules:
       - Every step's task must be a standalone question. The agents cannot see the
@@ -47,6 +55,7 @@ prompt:
       {"intent":"sql","reason":"company data","plan":[{"id":"s1","agent":"sql","skill":"answer_sql_question","task":"How many customers do we have in each country?","depends_on":[]}]}
       {"intent":"compare","reason":"our numbers vs the market","plan":[{"id":"s1","agent":"sql","skill":"answer_sql_question","task":"What is our revenue from Beverages by year?","depends_on":[]},{"id":"s2","agent":"synthesis","skill":"synthesise_findings","task":"How does our beverage revenue compare with the global beverage market trend?","depends_on":["s1"]}]}
       {"intent":"direct","reason":"greeting","plan":[]}
+      {"intent":"clarify","reason":"no target currency","plan":[],"question":"Which currency should I convert the revenue to?","options":["EUR","GBP","INR"]}
   - role: user
     content: |
       Conversation so far:

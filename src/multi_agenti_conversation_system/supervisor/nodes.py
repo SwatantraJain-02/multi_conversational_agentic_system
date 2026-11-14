@@ -1,9 +1,11 @@
 """The supervisor's graph nodes and routing.
 
     planner -> supervisor --(ready steps)--> run_step x N (parallel, Send) --> supervisor
-                  |  \\--(a step needs approval)--> hitl_gate -> resume_dispatch --> supervisor
-                  |--(plan done / budget / stuck)--> finalize -> summarize_history -> END
-                  \\--(intent direct)--------------> direct_answer -> summarize_history -> END
+       ^          |  \\--(a step waits for a human)--> hitl_gate -> resume_dispatch --> supervisor
+       |          |--(intent clarify)--> clarify_gate -> apply_clarification --+
+       |          |--(plan done / budget / stuck)--> finalize -> summarize_history -> END
+       |          \\--(intent direct)--------------> direct_answer -> summarize_history -> END
+       +-----------------------------------------------------------------------+
 
 - `planner` (LLM, structured) proposes a plan; `validate_plan` decides if it is acceptable,
   with one repair attempt. Sub-agents don't see the conversation, so every step's task is a
@@ -12,8 +14,13 @@
   parallel, in one superstep), within a budget of `max_dispatches` per turn, and calls no LLM.
 - HITL across A2A takes three nodes because `interrupt()` re-runs its whole node (G22):
   `run_step` sends the task; if the agent answers `input_required` that result waits in
-  `results`; `hitl_gate` only calls `interrupt()`; `resume_dispatch` sends the decision on the
-  same A2A task. Approvals are handled one at a time, so the payload names its step.
+  `results`; `hitl_gate` only calls `interrupt()`; `resume_dispatch` sends the reply on the
+  same A2A task. Pauses are handled one at a time, so the payload names its step. A pause is
+  an approval or a clarifying question (see `hitl`).
+- The planner may ask the user one question per turn itself (intent "clarify"), when the
+  request can't be planned well without a detail only the user can give. `clarify_gate`
+  only interrupts; `apply_clarification` guards the answer, adds it to the question, and
+  plans again. A second "clarify" in the same turn is rejected: the model must plan.
 - `finalize` composes the answer in code from what the agents returned: it never writes a
   competing answer. A failed step gives a partial answer that names what is missing.
   Re-planning after a failed step is deliberately not done (see the plan document).
@@ -133,7 +140,14 @@ async def planner(state: AgentState, runtime: Rt) -> dict[str, Any]:
         }
 
     prompt = await aget_prompt("supervisor/plan")
+    asked = sum(1 for c in state.get("clarifications", []) if not c["step_id"])
+    may_clarify = asked < hitl.MAX_CLARIFICATIONS
     feedback, error = "", "no plan"
+    if not may_clarify:
+        feedback = (
+            "You have already asked the user a question this turn: do not ask again. "
+            "Plan with a reasonable assumption.\n\n"
+        )
     for _ in range(PLAN_ATTEMPTS):
         messages = prompt.compile(
             capabilities=render_capabilities(capabilities),
@@ -159,7 +173,20 @@ async def planner(state: AgentState, runtime: Rt) -> dict[str, Any]:
                 "Your previous reply was unusable. Reply with valid JSON only.\n\n"
             )
             continue
-        error = validate_plan(decision, capabilities) or ""
+        error = validate_plan(decision, capabilities, may_clarify=may_clarify) or ""
+        if not error and decision.intent == "clarify":
+            return {
+                "intent": "clarify",
+                "plan": [],
+                "plan_error": "",
+                "pending_question": hitl.clarify_payload(
+                    decision.question, decision.options
+                ),
+                "prompt_versions": {
+                    **state.get("prompt_versions", {}),
+                    prompt.name: prompt.tag,
+                },
+            }
         if not error:
             return {
                 "intent": decision.intent,
@@ -208,6 +235,8 @@ def supervisor(state: AgentState, runtime: Rt) -> dict[str, Any]:
 def route_after_supervisor(state: AgentState) -> list[Send] | str:
     if state.get("plan_error"):
         return "finalize"
+    if state["intent"] == "clarify":
+        return "clarify_gate"
     if not state["plan"]:
         return "direct_answer" if state["intent"] == "direct" else "finalize"
     if _pending(state):
@@ -288,6 +317,39 @@ def hitl_gate(state: AgentState) -> dict[str, Any]:
         "approvals": [
             {"step_id": step_id, "agent": waiting["agent"], "approved": approved}
         ],
+    }
+
+
+def clarify_gate(state: AgentState) -> dict[str, Any]:
+    """The planner's own question to the user. Only interrupt() here (G22)."""
+    decision = interrupt(
+        {**state["pending_question"], "step_id": "", "agent": "supervisor"}
+    )
+    return {
+        "hitl_decision": {
+            "step_id": "",
+            "kind": hitl.CLARIFY,
+            "answer": hitl.answer_of(decision),
+        }
+    }
+
+
+async def apply_clarification(state: AgentState, runtime: Rt) -> dict[str, Any]:
+    """Guard the answer, add the exchange to the question, and plan again."""
+    asked = state["pending_question"]["question"]
+    answer, update = await guarded_answer(
+        runtime.context, state["hitl_decision"]["answer"]
+    )
+    question = state.get("standalone_question") or state["question"]
+    return {
+        **update,
+        "standalone_question": hitl.with_clarification(question, asked, answer),
+        "clarifications": [
+            {"step_id": "", "agent": "supervisor", "question": asked, "answer": answer}
+        ],
+        "pending_question": None,
+        "hitl_decision": None,
+        "intent": "",
     }
 
 
@@ -431,10 +493,13 @@ async def direct_answer(state: AgentState, runtime: Rt) -> dict[str, Any]:
     """No lookup needed: reply from the conversation (greetings, 'what can you do', follow-ups)."""
     ctx = runtime.context
     prompt = await aget_prompt("supervisor/direct")
+    question = state["question"]
+    for c in state.get("clarifications", []):
+        question = hitl.with_clarification(question, c["question"], c["answer"])
     messages = prompt.compile(
         capabilities=render_capabilities(ctx.registry.capabilities()),
         history=memory_block(state) + history_text(state),
-        question=state["question"],
+        question=question,
     )
     try:
         reply = await tracing.generation(
