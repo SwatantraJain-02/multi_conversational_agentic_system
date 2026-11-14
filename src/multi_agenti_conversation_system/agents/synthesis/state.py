@@ -14,6 +14,10 @@ class SynthesisState(TypedDict, total=False):
     delegate: bool  # no usable external result: ask the Web agent
     delegated: bool  # ... and we did
     delegation_error: str  # why the Web agent's answer isn't there (when it isn't)
+    # The Web agent paused (a question for the user): its input_required TaskResult, held
+    # while the question is relayed up; `relay_reply` is the user's reply to pass back.
+    web_waiting: dict[str, Any] | None
+    relay_reply: dict[str, Any] | None
     # --- result
     gaps: list[str]  # what is missing and why, in words
     answer: str

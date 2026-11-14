@@ -33,6 +33,8 @@ def build_graph(checkpointer):
     graph.add_node("check_inputs", nodes.check_inputs)
     graph.add_node("derive_external_question", nodes.derive_external_question)
     graph.add_node("delegate_web", nodes.delegate_web)
+    graph.add_node("relay_gate", nodes.relay_gate)
+    graph.add_node("resume_web", nodes.resume_web)
     graph.add_node("compose", nodes.compose, retry_policy=RETRY)
 
     graph.add_edge(START, "check_inputs")
@@ -40,7 +42,13 @@ def build_graph(checkpointer):
         "check_inputs", nodes.route_after_check, ["derive_external_question", "compose"]
     )
     graph.add_edge("derive_external_question", "delegate_web")
-    graph.add_edge("delegate_web", "compose")
+    graph.add_conditional_edges(
+        "delegate_web", nodes.route_after_web, ["relay_gate", "compose"]
+    )
+    graph.add_edge("relay_gate", "resume_web")
+    graph.add_conditional_edges(
+        "resume_web", nodes.route_after_web, ["relay_gate", "compose"]
+    )
     graph.add_edge("compose", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -66,6 +74,8 @@ def build_input(request: TaskRequest) -> dict[str, Any]:
         "delegate": False,
         "delegated": False,
         "delegation_error": "",
+        "web_waiting": None,
+        "relay_reply": None,
         "gaps": [],
         "answer": "",
         "citations": [],

@@ -1,6 +1,9 @@
 """The Synthesis agent's graph nodes.
 
     check_inputs -> [derive_external_question -> delegate_web] -> compose
+                                                    |   ^
+                     (Web asks the user something)  v   |
+                                       relay_gate -> resume_web
 
 Peer delegation is deterministic: if there is no usable external result, the agent ALWAYS
 asks the Web agent itself, over A2A, with its own task id as `parent_task_id` (an LLM-decided
@@ -11,6 +14,10 @@ If the delegation fails (Web agent down, timeout), the task still succeeds: the 
 what is available and says what is missing, and `data.partial` is set. Only when there is
 nothing at all to write about does it fail.
 
+If the Web agent pauses with a question for the user (input-required), this agent pauses
+too, with the same payload plus `asked_by`, so the supervisor shows it to the user; the reply
+goes back on the Web agent's own task. `relay_gate` only interrupts (G22); `resume_web` sends.
+
 External text comes from the internet: it only enters the prompt in the EXTERNAL block,
 which the prompt marks as untrusted data.
 """
@@ -20,8 +27,9 @@ import logging
 from typing import Any
 
 from langgraph.runtime import Runtime
+from langgraph.types import interrupt
 
-from multi_agenti_conversation_system import tracing
+from multi_agenti_conversation_system import hitl, tracing
 from multi_agenti_conversation_system.a2a.contracts import (
     AgentError,
     TaskConstraints,
@@ -111,8 +119,49 @@ async def delegate_web(state: SynthesisState, runtime: Rt) -> dict[str, Any]:
             constraints=TaskConstraints(timeout_s=ctx.delegate_timeout_s),
         ),
     )
+    return _took(state, result)
+
+
+def relay_gate(state: SynthesisState) -> dict[str, Any]:
+    """Pass the Web agent's question up to our caller. Only interrupt() here (G22)."""
+    waiting = state["web_waiting"]
+    payload = {**waiting["data"], "asked_by": waiting["agent"]}
+    decision = interrupt(payload)
+    if hitl.kind_of(payload) == hitl.CLARIFY:
+        reply: dict[str, Any] = {"answer": hitl.answer_of(decision)}
+    else:
+        reply = {
+            "approved": isinstance(decision, dict) and decision.get("approved") is True
+        }
+    return {"relay_reply": reply}
+
+
+async def resume_web(state: SynthesisState, runtime: Rt) -> dict[str, Any]:
+    """Send the user's reply on the Web agent's waiting task."""
+    ctx = runtime.context
+    result: TaskResult = await ctx.registry.resume(
+        TaskResult.model_validate(state["web_waiting"]),
+        state["relay_reply"],
+        sender="synthesis",
+        timeout_s=ctx.delegate_timeout_s,
+    )
+    return {**_took(state, result), "relay_reply": None}
+
+
+def route_after_web(state: SynthesisState) -> str:
+    return "relay_gate" if state.get("web_waiting") else "compose"
+
+
+def _took(state: SynthesisState, result: TaskResult) -> dict[str, Any]:
+    """What a reply from the Web agent means for this run: an answer, a pause, or a gap."""
+    if result.status == "input_required":
+        return {"web_waiting": result.model_dump(mode="json"), "delegated": True}
     if usable(result.model_dump(mode="json")):
-        return {"external": result.model_dump(mode="json"), "delegated": True}
+        return {
+            "external": result.model_dump(mode="json"),
+            "delegated": True,
+            "web_waiting": None,
+        }
     reason = (
         f"{result.error.code}: {result.error.message}"
         if result.error
@@ -120,6 +169,7 @@ async def delegate_web(state: SynthesisState, runtime: Rt) -> dict[str, Any]:
     )
     return {
         "delegated": True,
+        "web_waiting": None,
         "delegation_error": reason,
         "gaps": [
             *state.get("gaps", []),
