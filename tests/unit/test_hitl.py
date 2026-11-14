@@ -225,3 +225,30 @@ async def test_the_next_turn_starts_with_no_clarifications():
     await sup.ask("t", "u", "thanks")
     values = (await sup.graph.aget_state(sup._config("t"))).values
     assert values["clarifications"] == [] and values["pending_question"] is None
+
+
+# ------------------------------------------------------ one question per turn, overall
+async def test_after_the_planner_asked_the_agents_are_told_not_to_ask():
+    registry = FakeRegistry()
+    sup, *_ = make(registry, Planner(clarify(), decision("sql", step("s1", "sql"))))
+    await sup.ask("t", "u", "Convert that revenue")
+    await sup.resume("t", answer="EUR")
+    assert registry.calls[0][1].constraints.allow_clarification is False
+
+
+async def test_without_a_question_the_agents_may_ask():
+    registry = FakeRegistry()
+    sup, *_ = make(registry, Planner(decision("sql", step("s1", "sql"))))
+    await sup.ask("t", "u", "How many customers?")
+    assert registry.calls[0][1].constraints.allow_clarification is True
+
+
+async def test_after_an_agent_asked_the_next_step_may_not_ask():
+    registry = FakeRegistry({"sql": ASKING, "resume": done("sql", "EUR 1.2M")})
+    plan = decision("compare", step("s1", "sql"), step("s2", "synthesis", "c", ["s1"]))
+    sup, *_ = make(registry, Planner(plan))
+    await sup.ask("t", "u", "q")
+    await sup.resume("t", answer="EUR")
+    synth = registry.calls[1][1]
+    assert registry.calls[1][0] == "synthesis"
+    assert synth.constraints.allow_clarification is False

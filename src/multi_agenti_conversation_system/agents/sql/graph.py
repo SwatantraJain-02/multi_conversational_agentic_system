@@ -5,6 +5,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
+from multi_agenti_conversation_system import hitl
 from multi_agenti_conversation_system.a2a.contracts import (
     AgentError,
     TaskRequest,
@@ -85,7 +86,10 @@ def build_input(request: TaskRequest) -> dict[str, Any]:
         "failed_sql": "",
         "refused": "",
         "clarify": None,
-        "clarified": 0,
+        # A caller that forbids questions counts as "already asked".
+        "clarified": 0
+        if request.constraints.allow_clarification
+        else hitl.MAX_CLARIFICATIONS,
         "est_rows": 0,
         "pii_columns": [],
         "requires_approval": False,

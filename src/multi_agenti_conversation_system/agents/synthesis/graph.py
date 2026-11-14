@@ -75,6 +75,7 @@ def build_input(request: TaskRequest) -> dict[str, Any]:
         "delegated": False,
         "delegation_error": "",
         "web_waiting": None,
+        "may_ask": request.constraints.allow_clarification,
         "relay_reply": None,
         "gaps": [],
         "answer": "",

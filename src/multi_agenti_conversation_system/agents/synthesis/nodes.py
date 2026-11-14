@@ -116,7 +116,10 @@ async def delegate_web(state: SynthesisState, runtime: Rt) -> dict[str, Any]:
             parent_task_id=state["task_id"],
             skill=ctx.web_skill,
             task=state["external_question"],
-            constraints=TaskConstraints(timeout_s=ctx.delegate_timeout_s),
+            constraints=TaskConstraints(
+                timeout_s=ctx.delegate_timeout_s,
+                allow_clarification=state.get("may_ask", True),
+            ),
         ),
     )
     return _took(state, result)

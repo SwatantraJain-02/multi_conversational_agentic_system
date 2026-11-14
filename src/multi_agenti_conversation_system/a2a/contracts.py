@@ -76,6 +76,9 @@ class TaskContext(_Contract):
 class TaskConstraints(_Contract):
     timeout_s: float | None = Field(default=None, gt=0)
     max_rows: int | None = Field(default=None, ge=1)
+    # False: the user has already been asked a question this turn; don't ask another
+    # (answer with a stated assumption). A delegating agent passes it on.
+    allow_clarification: bool = True
 
 
 class TaskRequest(_Contract):

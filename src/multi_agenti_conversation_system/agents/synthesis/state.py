@@ -17,6 +17,7 @@ class SynthesisState(TypedDict, total=False):
     # The Web agent paused (a question for the user): its input_required TaskResult, held
     # while the question is relayed up; `relay_reply` is the user's reply to pass back.
     web_waiting: dict[str, Any] | None
+    may_ask: bool  # our caller allows a question to the user: so may the Web agent
     relay_reply: dict[str, Any] | None
     # --- result
     gaps: list[str]  # what is missing and why, in words

@@ -445,3 +445,18 @@ async def test_a_second_question_is_ignored_and_the_question_is_searched():
     state = await graph.ainvoke(Command(resume={"answer": ""}), config, context=ctx)
     assert "__interrupt__" not in state and len(web.searched) == 1
     assert web.searched[0][0].startswith("Jaguar news?")  # the question, as a query
+
+
+async def test_a_caller_that_forbids_questions_gets_a_search_instead():
+    from multi_agenti_conversation_system.a2a.contracts import TaskConstraints
+
+    web = FakeWeb(AnyQuery())
+    graph, ctx = make(web, PlansInOrder(asks()))
+    req = TaskRequest(
+        sender="t",
+        skill="answer_web_question",
+        task="Jaguar news?",
+        constraints=TaskConstraints(allow_clarification=False),
+    )
+    state = await run(graph, ctx, req)
+    assert "__interrupt__" not in state and len(web.searched) == 1

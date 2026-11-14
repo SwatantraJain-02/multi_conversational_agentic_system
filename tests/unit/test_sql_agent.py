@@ -584,3 +584,14 @@ async def test_a_new_task_in_the_same_context_may_ask_again():
     await graph.ainvoke(Command(resume={"answer": "x"}), config, context=ctx)
     out, _ = await run(graph, ctx)
     assert out["__interrupt__"][0].value["kind"] == "clarify"
+
+
+async def test_a_caller_that_forbids_questions_gets_a_query_with_an_assumption():
+    from multi_agenti_conversation_system.a2a.contracts import TaskConstraints
+
+    model = ScriptedModel(asks(), gen(GOOD))
+    graph, ctx, db, _ = make(model)
+    req = request(constraints=TaskConstraints(allow_clarification=False))
+    state, _ = await run(graph, ctx, req)
+    assert "__interrupt__" not in state and db.ran == [GOOD]
+    assert "do not ask again" in model.seen[1][-1]["content"]

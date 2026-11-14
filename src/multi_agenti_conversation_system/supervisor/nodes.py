@@ -17,6 +17,9 @@
   `results`; `hitl_gate` only calls `interrupt()`; `resume_dispatch` sends the reply on the
   same A2A task. Pauses are handled one at a time, so the payload names its step. A pause is
   an approval or a clarifying question (see `hitl`).
+- At most one question reaches the user per turn: once one was answered, later steps are
+  sent with `allow_clarification=False` and assume instead (steps already running in
+  parallel may still each ask once).
 - The planner may ask the user one question per turn itself (intent "clarify"), when the
   request can't be planned well without a detail only the user can give. `clarify_gate`
   only interrupts; `apply_clarification` guards the answer, adds it to the question, and
@@ -73,6 +76,7 @@ class StepTask(TypedDict):
     domain: str | None
     profile: dict[str, str]
     memories: list[str]  # the top-k relevant facts, not the whole store
+    may_ask: bool  # no question has been put to the user yet this turn
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -252,6 +256,7 @@ def route_after_supervisor(state: AgentState) -> list[Send] | str:
                     domain=state.get("selected_domain"),
                     profile=state.get("profile", {}),
                     memories=state.get("facts", []),
+                    may_ask=not state.get("clarifications"),
                 ),
             )
             for sid in state["ready"]
@@ -277,7 +282,9 @@ async def run_step(task: StepTask, runtime: Rt) -> dict[str, Any]:
             profile=task["profile"], memories=task["memories"], session=session
         ),
         constraints=TaskConstraints(
-            timeout_s=ctx.skill_timeouts.get(step["skill"], DEFAULT_TIMEOUT_S)
+            timeout_s=ctx.skill_timeouts.get(step["skill"], DEFAULT_TIMEOUT_S),
+            # One question per turn, whoever asks it: a later step assumes instead.
+            allow_clarification=task.get("may_ask", True),
         ),
     )
     started = time.time()

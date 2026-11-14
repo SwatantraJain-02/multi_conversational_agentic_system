@@ -331,3 +331,15 @@ async def test_a_failed_reply_after_the_question_is_a_gap_not_a_failure():
     assert (
         result.ok and result.data["partial"] and "web agent restarted" in result.answer
     )
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_the_callers_rule_on_questions_is_passed_to_the_web_agent(allowed):
+    from multi_agenti_conversation_system.a2a.contracts import TaskConstraints
+
+    registry = FakeRegistry()
+    graph, ctx, _ = make(registry)
+    req = request(internal=internal())
+    req.constraints = TaskConstraints(allow_clarification=allowed)
+    await run(graph, ctx, req)
+    assert registry.calls[0][1].constraints.allow_clarification is allowed
