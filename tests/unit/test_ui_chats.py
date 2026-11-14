@@ -24,11 +24,19 @@ class FakeSupervisor:
     def reset(self) -> None:
         self.chats = ChatLog(InMemoryStore())
         self.ended: list[tuple[str, str]] = []
+        self.script: list[service.TurnResult] = []  # replies to ask / resume, in order
+        self.resumes: list[dict] = []
 
     async def ask(self, thread_id, user_id, text, *, domain=None, on_event=None):
+        if self.script:
+            return self.script.pop(0)
         return service.TurnResult(
             thread_id=thread_id, status="answered", answer=f"echo: {text}"
         )
+
+    async def resume(self, thread_id, approved=None, *, answer=None, **kw):
+        self.resumes.append({"approved": approved, "answer": answer})
+        return self.script.pop(0)
 
     async def what_i_know(self, user_id):
         return {"profile": {}, "facts": []}
@@ -101,3 +109,75 @@ def test_switching_user_ends_the_chat_for_its_own_user_and_hides_it(page):
     assert chat_buttons(at) == []
     at.sidebar.text_input[0].set_value("demo-user").run()
     assert len(chat_buttons(at)) == 1 and not at.exception
+
+
+# ------------------------------------------------------------- a clarifying question
+def asking(question="Which currency should I convert the revenue to?"):
+    return service.TurnResult(
+        thread_id="t",
+        status="needs_clarification",
+        clarification={
+            "kind": "clarify",
+            "question": question,
+            "options": ["EUR", "GBP"],
+            "agent": "supervisor",
+            "step_id": "",
+        },
+    )
+
+
+def answered(text="Revenue was EUR 1.2M."):
+    return service.TurnResult(thread_id="t", status="answered", answer=text)
+
+
+def test_a_question_shows_its_options_and_an_option_is_the_answer(page):
+    at, fake = page
+    fake.script = [asking(), answered()]
+    at.chat_input[0].set_value("Convert that revenue").run()
+    assert at.info[0].value == "Which currency should I convert the revenue to?"
+    assert at.chat_input[0].disabled  # no new message while it waits
+    next(b for b in at.button if b.label == "EUR").click().run()
+    assert fake.resumes == [{"approved": None, "answer": "EUR"}]
+    assert [m["content"] for m in at.session_state["messages"]] == [
+        "Convert that revenue",
+        "Which currency should I convert the revenue to?",
+        "EUR",
+        "Revenue was EUR 1.2M.",
+    ]
+    assert at.session_state["pending"] is None and not at.exception
+
+
+def test_a_typed_answer_or_skip_is_sent_too(page):
+    at, fake = page
+    fake.script = [asking(), answered(), asking("Which year?"), answered("2025.")]
+    at.chat_input[0].set_value("Convert that revenue").run()
+    form_input = next(t for t in at.text_input if t.label == "Your answer")
+    form_input.set_value("Indian rupees")
+    next(b for b in at.button if b.label == "Send").click().run()
+    assert fake.resumes[-1]["answer"] == "Indian rupees"
+
+    at.chat_input[0].set_value("And for last year?").run()
+    next(b for b in at.button if b.label == "Skip: let it assume").click().run()
+    assert fake.resumes[-1]["answer"] == ""
+    assert at.session_state["messages"][-2]["content"] == "(skipped)"
+    assert not at.exception
+
+
+def test_a_question_followed_by_an_approval_shows_the_approval_card(page):
+    at, fake = page
+    approval = service.TurnResult(
+        thread_id="t",
+        status="needs_approval",
+        approval={
+            "kind": "approval",
+            "reason": "Approval needed: PII.",
+            "sql": "SELECT 1",
+        },
+    )
+    fake.script = [asking(), approval, answered("Done.")]
+    at.chat_input[0].set_value("List contacts").run()
+    next(b for b in at.button if b.label == "EUR").click().run()
+    assert at.warning[0].value == "Approval needed: PII."
+    next(b for b in at.button if b.label == "Approve").click().run()
+    assert fake.resumes[-1] == {"approved": True, "answer": None}
+    assert at.session_state["messages"][-1]["content"] == "Done." and not at.exception

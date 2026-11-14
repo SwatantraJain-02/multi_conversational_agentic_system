@@ -13,7 +13,8 @@ serialises turns of one thread itself (G13), so a double click cannot interleave
 
 State: the conversation lives in the Postgres checkpoint (per thread id). `st.session_state`
 holds only what the screen needs: the user, the thread id, the rendered messages, and a turn
-that is waiting for approval.
+that is waiting for the user: an approval (Approve / Reject) or a clarifying question from the
+planner or an agent (options, a free answer, or Skip, which lets it assume and say so).
 """
 
 import asyncio
@@ -43,8 +44,10 @@ NODE_LABELS = {
     "load_context": "Recalling relevant memory",
     "planner": "Planning which agents to ask",
     "run_step": "An agent answered",
-    "hitl_gate": "Waiting for your approval",
-    "resume_dispatch": "Running the approved query",
+    "hitl_gate": "Waiting for you",
+    "resume_dispatch": "Passing on your reply",
+    "clarify_gate": "Asking you a question",
+    "apply_clarification": "Using your answer",
     "finalize": "Putting the answer together",
     "direct_answer": "Answering from the conversation",
     "write_memory": "Updating memory",
@@ -133,7 +136,7 @@ ss = st.session_state
 ss.setdefault("user_id", "demo-user")
 ss.setdefault("thread_id", f"chat-{uuid.uuid4().hex[:8]}")
 ss.setdefault("messages", [])
-ss.setdefault("pending", None)  # a TurnResult dict waiting for approval
+ss.setdefault("pending", None)  # a TurnResult dict waiting for an approval or an answer
 ss.setdefault("memory_version", 0)
 ss.setdefault("dirty", False)  # the open chat has new turns since it was opened
 
@@ -299,14 +302,57 @@ def add_answer(turn: TurnResult) -> None:
     ss.memory_version += 1
 
 
-for i, m in enumerate(ss.messages):
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
-        if m.get("meta"):
-            render_details(m["meta"], f"{ss.thread_id}-{i}")
+def take(turn: TurnResult | None) -> None:
+    """A turn either answered or paused again (a question can be followed by an approval)."""
+    if turn and turn.status in ("needs_approval", "needs_clarification"):
+        ss.pending = asdict(turn)
+    elif turn:
+        add_answer(turn)
 
-if ss.pending:
-    request = ss.pending["approval"]
+
+def reply(**value: Any) -> None:
+    """Send the user's reply to the pause and show what came back."""
+    ss.pending = None
+    take(
+        run_turn(
+            be,
+            lambda cb: supervisor.resume(
+                ss.thread_id, user_id=ss.user_id, on_event=cb, **value
+            ),
+        )
+    )
+    save_chat()
+    st.rerun()
+
+
+def ask_card(request: dict[str, Any]) -> None:
+    """A clarifying question: one button per option, a free answer, or Skip."""
+    asker = request.get("asked_by") or request.get("agent") or "assistant"
+    with st.chat_message("assistant"):
+        st.info(request.get("question") or "I need one more detail.")
+        st.caption(f"Asked by: {'the planner' if asker == 'supervisor' else asker}")
+        options = request.get("options") or []
+        chosen = None
+        for col, option in zip(st.columns(len(options) or 1), options, strict=False):
+            if col.button(option, key=f"opt-{option}"):
+                chosen = option
+        with st.form("clarify", clear_on_submit=True):
+            typed = st.text_input("Your answer", max_chars=500)
+            send, skip = st.columns([1, 5])
+            sent = send.form_submit_button("Send", type="primary")
+            skipped = skip.form_submit_button("Skip: let it assume")
+    answer = chosen or (typed.strip() if sent and typed.strip() else None)
+    if skipped:
+        answer = ""
+    if answer is not None:
+        ss.messages.append(
+            {"role": "assistant", "content": request.get("question", "")}
+        )
+        ss.messages.append({"role": "user", "content": answer or "(skipped)"})
+        reply(answer=answer)
+
+
+def approval_card(request: dict[str, Any]) -> None:
     with st.chat_message("assistant"):
         st.warning(request.get("reason") or "This query needs your approval.")
         st.code(request.get("sql", ""), language="sql")
@@ -323,17 +369,19 @@ if ss.pending:
             else None
         )
     if decision is not None:
-        ss.pending = None
-        turn = run_turn(
-            be,
-            lambda cb: supervisor.resume(
-                ss.thread_id, approved=decision, user_id=ss.user_id, on_event=cb
-            ),
-        )
-        if turn:
-            add_answer(turn)
-        save_chat()
-        st.rerun()
+        reply(approved=decision)
+
+
+for i, m in enumerate(ss.messages):
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+        if m.get("meta"):
+            render_details(m["meta"], f"{ss.thread_id}-{i}")
+
+if ss.pending and ss.pending["status"] == "needs_clarification":
+    ask_card(ss.pending["clarification"])
+elif ss.pending:
+    approval_card(ss.pending["approval"])
 
 if prompt := st.chat_input(
     "Ask about our sales data, or about the world", disabled=bool(ss.pending)
@@ -351,9 +399,6 @@ if prompt := st.chat_input(
             on_event=cb,
         ),
     )
-    if turn and turn.status == "needs_approval":
-        ss.pending = asdict(turn)
-    elif turn:
-        add_answer(turn)
+    take(turn)
     save_chat()
     st.rerun()
