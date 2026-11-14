@@ -4,6 +4,8 @@
         turn = await supervisor.ask("thread-1", "alice", "How many customers per country?")
         if turn.status == "needs_approval":          # a human has to approve a SQL query
             turn = await supervisor.resume("thread-1", approved=True)
+        elif turn.status == "needs_clarification":   # an agent asks one question
+            turn = await supervisor.resume("thread-1", answer="in EUR")
         print(turn.answer, turn.citations, turn.plan)
 
 It runs inside the caller's event loop (no `asyncio.run` in here), so a UI can keep one
@@ -25,7 +27,7 @@ from typing import Any, Literal
 
 from langgraph.types import Command
 
-from multi_agenti_conversation_system import tracing, vectorstore
+from multi_agenti_conversation_system import hitl, tracing, vectorstore
 from multi_agenti_conversation_system.a2a.client import AgentRegistry
 from multi_agenti_conversation_system.agents.llm_calls import structured, text
 from multi_agenti_conversation_system.config import settings
@@ -55,7 +57,7 @@ EventCallback = Callable[[dict[str, Any]], None]
 @dataclass
 class TurnResult:
     thread_id: str
-    status: Literal["answered", "needs_approval"]
+    status: Literal["answered", "needs_approval", "needs_clarification"]
     answer: str = ""
     citations: list[dict[str, Any]] = field(default_factory=list)
     sql_used: str | None = None
@@ -65,6 +67,8 @@ class TurnResult:
     partial: bool = False
     prompt_versions: dict[str, str] = field(default_factory=dict)
     approval: dict[str, Any] | None = None  # the interrupt payload when needs_approval
+    # ... when needs_clarification: {"question", "options", "agent", ...}
+    clarification: dict[str, Any] | None = None
     results: dict[str, Any] = field(default_factory=dict)  # step id -> TaskResult dict
     timings: dict[str, list[float]] = field(
         default_factory=dict
@@ -108,18 +112,24 @@ class Supervisor:
     async def resume(
         self,
         thread_id: str,
-        approved: bool,
+        approved: bool | None = None,
         *,
+        answer: str | None = None,
         user_id: str = "",
         on_event: EventCallback | None = None,
         trace_ctx: dict[str, str] | None = None,
     ) -> TurnResult:
-        """Answer the approval a turn is waiting for (`TurnResult.approval`)."""
+        """Reply to the pause a turn is waiting for: `approved` for `TurnResult.approval`,
+        `answer` for `TurnResult.clarification` ("" skips the question: the agent assumes)."""
+        if answer is not None:
+            value: dict[str, Any] = {"answer": answer}
+        else:
+            value = {"approved": approved is True}
         return await self._turn(
             thread_id,
             user_id,
-            Command(resume={"approved": approved}),
-            "approval",
+            Command(resume=value),
+            "clarification" if answer is not None else "approval",
             on_event,
             trace_ctx,
         )
@@ -291,6 +301,10 @@ class Supervisor:
             "timings": values.get("timings", {}),
             "trace_id": trace_id,
         }
+        if approval is not None and hitl.kind_of(approval) == hitl.CLARIFY:
+            return TurnResult(
+                status="needs_clarification", clarification=approval, **common
+            )
         if approval is not None:
             return TurnResult(status="needs_approval", approval=approval, **common)
         return TurnResult(

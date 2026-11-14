@@ -93,6 +93,7 @@ def turn_input(
         "timings": Overwrite({}),
         "hitl_decision": None,
         "approvals": Overwrite([]),
+        "clarifications": Overwrite([]),
         "answer": "",
         "citations": [],
         "sql_used": None,

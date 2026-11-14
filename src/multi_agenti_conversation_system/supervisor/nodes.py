@@ -30,7 +30,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveM
 from langgraph.runtime import Runtime
 from langgraph.types import Send, interrupt
 
-from multi_agenti_conversation_system import tracing
+from multi_agenti_conversation_system import hitl, tracing
 from multi_agenti_conversation_system.a2a.contracts import (
     TaskConstraints,
     TaskContext,
@@ -44,6 +44,7 @@ from multi_agenti_conversation_system.supervisor.context import (
     DEFAULT_TIMEOUT_S,
     SupervisorContext,
 )
+from multi_agenti_conversation_system.supervisor.guard_nodes import guard_text
 from multi_agenti_conversation_system.supervisor.memory_nodes import memory_block
 from multi_agenti_conversation_system.supervisor.plan import (
     SYNTHESIS_AGENT,
@@ -92,6 +93,22 @@ def render_capabilities(capabilities: list[dict[str, Any]]) -> str:
             for c in capabilities
         )
         or "(no agents are available)"
+    )
+
+
+async def guarded_answer(
+    ctx: SupervisorContext, answer: str
+) -> tuple[str, dict[str, Any]]:
+    """The user's answer to a clarifying question, through the input guard (it arrives on a
+    resume, so `input_guard` never saw it). A blocked answer counts as no answer."""
+    if not answer:
+        return "", {}
+    verdict = await guard_text(ctx, answer)
+    if verdict.action == "block":
+        logger.warning("clarification answer blocked: %s", verdict.reasons)
+        return "", {"guard_flagged": True}
+    return hitl.answer_of({"answer": verdict.text}), (
+        {"guard_flagged": True} if verdict.flagged else {}
     )
 
 
@@ -243,20 +260,31 @@ async def run_step(task: StepTask, runtime: Rt) -> dict[str, Any]:
 
 
 def hitl_gate(state: AgentState) -> dict[str, Any]:
-    """Pause for a human on the first waiting step. Only interrupt() here (G22)."""
+    """Pause for a human on the first waiting step: an approval or a clarifying question.
+    Only interrupt() here (G22)."""
     step_id = _pending(state)[0]
     waiting = state["results"][step_id]
+    kind = hitl.kind_of(waiting["data"])
     decision = interrupt(
         {
             "step_id": step_id,
             "agent": waiting["agent"],
             "reason": waiting["answer"],
             **waiting["data"],
+            "kind": kind,
         }
     )
+    if kind == hitl.CLARIFY:
+        return {
+            "hitl_decision": {
+                "step_id": step_id,
+                "kind": kind,
+                "answer": hitl.answer_of(decision),
+            }
+        }
     approved = isinstance(decision, dict) and decision.get("approved") is True
     return {
-        "hitl_decision": {"step_id": step_id, "approved": approved},
+        "hitl_decision": {"step_id": step_id, "kind": kind, "approved": approved},
         "approvals": [
             {"step_id": step_id, "agent": waiting["agent"], "approved": approved}
         ],
@@ -264,17 +292,33 @@ def hitl_gate(state: AgentState) -> dict[str, Any]:
 
 
 async def resume_dispatch(state: AgentState, runtime: Rt) -> dict[str, Any]:
-    """Send the human's decision on the agent's own A2A task; its result replaces the waiting one."""
+    """Send the human's reply on the agent's own A2A task; its result replaces the waiting one."""
     ctx, decision = runtime.context, state["hitl_decision"]
     step_id = decision["step_id"]
     waiting = TaskResult.model_validate(state["results"][step_id])
     skill = next(s["skill"] for s in state["plan"] if s["id"] == step_id)
+    update: dict[str, Any] = {}
+    if decision["kind"] == hitl.CLARIFY:
+        answer, update = await guarded_answer(ctx, decision["answer"])
+        value: dict[str, Any] = {"answer": answer}
+        update["clarifications"] = [
+            {
+                "step_id": step_id,
+                "agent": waiting.agent,
+                "question": str(waiting.data.get("question", "")),
+                "answer": answer,
+            }
+        ]
+    else:
+        value = {"approved": decision["approved"]}
     result = await ctx.registry.resume(
-        waiting,
-        {"approved": decision["approved"]},
-        timeout_s=ctx.skill_timeouts.get(skill, DEFAULT_TIMEOUT_S),
+        waiting, value, timeout_s=ctx.skill_timeouts.get(skill, DEFAULT_TIMEOUT_S)
     )
-    return {"results": {step_id: result.model_dump(mode="json")}, "hitl_decision": None}
+    return {
+        **update,
+        "results": {step_id: result.model_dump(mode="json")},
+        "hitl_decision": None,
+    }
 
 
 def finalize(state: AgentState) -> dict[str, Any]:
@@ -367,7 +411,19 @@ def _answer(
         "agents_used": list(dict.fromkeys(agents)),
         "partial": partial,
         "prompt_versions": versions,
-        "messages": [AIMessage(content=answer)],
+        # The questions asked this turn go into the conversation before the answer, so a
+        # follow-up ("and in EUR?") sees what was agreed.
+        "messages": [
+            *(
+                m
+                for c in state.get("clarifications", [])
+                for m in (
+                    AIMessage(content=c["question"]),
+                    HumanMessage(content=c["answer"] or "(no answer)"),
+                )
+            ),
+            AIMessage(content=answer),
+        ],
     }
 
 

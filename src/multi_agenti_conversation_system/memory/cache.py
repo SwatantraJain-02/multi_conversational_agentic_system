@@ -96,13 +96,22 @@ def lookup_filter(
 
 
 def cacheable(
-    *, partial: bool, approvals: list, intent: str, standalone_ok: bool, answer: str
+    *,
+    partial: bool,
+    approvals: list,
+    intent: str,
+    standalone_ok: bool,
+    answer: str,
+    clarifications: list = (),
 ) -> bool:
-    """Only complete, successful, standalone answers that needed no human."""
+    """Only complete, successful, standalone answers that needed no human. A clarified answer
+    is keyed on the question as first asked, which was ambiguous: the next person to ask it
+    may mean something else."""
     return bool(
         answer.strip()
         and not partial
         and not approvals
+        and not clarifications
         and intent in ("sql", "web", "compare", "hybrid")
         and standalone_ok
     )

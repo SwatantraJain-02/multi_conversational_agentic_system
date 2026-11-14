@@ -92,8 +92,13 @@ class AgentState(TypedDict, total=False):
     skipped: list[str]  # steps dropped because the dispatch budget ran out
     results: Annotated[dict[str, Any], merge_dicts]  # step id -> TaskResult dict
     timings: Annotated[dict[str, Any], merge_dicts]  # step id -> [start, end] (epoch s)
-    hitl_decision: dict[str, Any] | None  # {"step_id", "approved"}
+    # The human's reply to a pause: {"step_id", "kind": "approval", "approved"} or
+    # {"step_id", "kind": "clarify", "answer"}; step_id is "" for the planner's own question.
+    hitl_decision: dict[str, Any] | None
     approvals: Annotated[list[dict[str, Any]], operator.add]  # audit: who decided what
+    # Questions asked and answered this turn: {"step_id", "agent", "question", "answer"}.
+    # Kept apart from `approvals`: an answer is never consent to personal data.
+    clarifications: Annotated[list[dict[str, Any]], operator.add]
     # --- the input guard, this turn
     guard_blocked: bool
     guard_flagged: (
