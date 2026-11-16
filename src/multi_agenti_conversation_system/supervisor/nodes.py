@@ -1,9 +1,11 @@
 """The supervisor's graph nodes and routing.
 
     planner -> supervisor --(ready steps)--> run_step x N (parallel, Send) --> supervisor
-                  |  \\--(a step needs approval)--> hitl_gate -> resume_dispatch --> supervisor
-                  |--(plan done / budget / stuck)--> finalize -> summarize_history -> END
-                  \\--(intent direct)--------------> direct_answer -> summarize_history -> END
+       ^          |  \\--(a step waits for a human)--> hitl_gate -> resume_dispatch --> supervisor
+       |          |--(intent clarify)--> clarify_gate -> apply_clarification --+
+       |          |--(plan done / budget / stuck)--> finalize -> summarize_history -> END
+       |          \\--(intent direct)--------------> direct_answer -> summarize_history -> END
+       +-----------------------------------------------------------------------+
 
 - `planner` (LLM, structured) proposes a plan; `validate_plan` decides if it is acceptable,
   with one repair attempt. Sub-agents don't see the conversation, so every step's task is a
@@ -12,8 +14,16 @@
   parallel, in one superstep), within a budget of `max_dispatches` per turn, and calls no LLM.
 - HITL across A2A takes three nodes because `interrupt()` re-runs its whole node (G22):
   `run_step` sends the task; if the agent answers `input_required` that result waits in
-  `results`; `hitl_gate` only calls `interrupt()`; `resume_dispatch` sends the decision on the
-  same A2A task. Approvals are handled one at a time, so the payload names its step.
+  `results`; `hitl_gate` only calls `interrupt()`; `resume_dispatch` sends the reply on the
+  same A2A task. Pauses are handled one at a time, so the payload names its step. A pause is
+  an approval or a clarifying question (see `hitl`).
+- At most one question reaches the user per turn: once one was answered, later steps are
+  sent with `allow_clarification=False` and assume instead (steps already running in
+  parallel may still each ask once).
+- The planner may ask the user one question per turn itself (intent "clarify"), when the
+  request can't be planned well without a detail only the user can give. `clarify_gate`
+  only interrupts; `apply_clarification` guards the answer, adds it to the question, and
+  plans again. A second "clarify" in the same turn is rejected: the model must plan.
 - `finalize` composes the answer in code from what the agents returned: it never writes a
   competing answer. A failed step gives a partial answer that names what is missing.
   Re-planning after a failed step is deliberately not done (see the plan document).
@@ -30,7 +40,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveM
 from langgraph.runtime import Runtime
 from langgraph.types import Send, interrupt
 
-from multi_agenti_conversation_system import tracing
+from multi_agenti_conversation_system import hitl, tracing
 from multi_agenti_conversation_system.a2a.contracts import (
     TaskConstraints,
     TaskContext,
@@ -44,6 +54,7 @@ from multi_agenti_conversation_system.supervisor.context import (
     DEFAULT_TIMEOUT_S,
     SupervisorContext,
 )
+from multi_agenti_conversation_system.supervisor.guard_nodes import guard_text
 from multi_agenti_conversation_system.supervisor.memory_nodes import memory_block
 from multi_agenti_conversation_system.supervisor.plan import (
     SYNTHESIS_AGENT,
@@ -65,6 +76,7 @@ class StepTask(TypedDict):
     domain: str | None
     profile: dict[str, str]
     memories: list[str]  # the top-k relevant facts, not the whole store
+    may_ask: bool  # no question has been put to the user yet this turn
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -95,6 +107,22 @@ def render_capabilities(capabilities: list[dict[str, Any]]) -> str:
     )
 
 
+async def guarded_answer(
+    ctx: SupervisorContext, answer: str
+) -> tuple[str, dict[str, Any]]:
+    """The user's answer to a clarifying question, through the input guard (it arrives on a
+    resume, so `input_guard` never saw it). A blocked answer counts as no answer."""
+    if not answer:
+        return "", {}
+    verdict = await guard_text(ctx, answer)
+    if verdict.action == "block":
+        logger.warning("clarification answer blocked: %s", verdict.reasons)
+        return "", {"guard_flagged": True}
+    return hitl.answer_of({"answer": verdict.text}), (
+        {"guard_flagged": True} if verdict.flagged else {}
+    )
+
+
 def _pending(state: AgentState) -> list[str]:
     """Step ids whose result is waiting for a human, in plan order."""
     return [
@@ -116,7 +144,14 @@ async def planner(state: AgentState, runtime: Rt) -> dict[str, Any]:
         }
 
     prompt = await aget_prompt("supervisor/plan")
+    asked = sum(1 for c in state.get("clarifications", []) if not c["step_id"])
+    may_clarify = asked < hitl.MAX_CLARIFICATIONS
     feedback, error = "", "no plan"
+    if not may_clarify:
+        feedback = (
+            "You have already asked the user a question this turn: do not ask again. "
+            "Plan with a reasonable assumption.\n\n"
+        )
     for _ in range(PLAN_ATTEMPTS):
         messages = prompt.compile(
             capabilities=render_capabilities(capabilities),
@@ -142,7 +177,20 @@ async def planner(state: AgentState, runtime: Rt) -> dict[str, Any]:
                 "Your previous reply was unusable. Reply with valid JSON only.\n\n"
             )
             continue
-        error = validate_plan(decision, capabilities) or ""
+        error = validate_plan(decision, capabilities, may_clarify=may_clarify) or ""
+        if not error and decision.intent == "clarify":
+            return {
+                "intent": "clarify",
+                "plan": [],
+                "plan_error": "",
+                "pending_question": hitl.clarify_payload(
+                    decision.question, decision.options
+                ),
+                "prompt_versions": {
+                    **state.get("prompt_versions", {}),
+                    prompt.name: prompt.tag,
+                },
+            }
         if not error:
             return {
                 "intent": decision.intent,
@@ -191,6 +239,8 @@ def supervisor(state: AgentState, runtime: Rt) -> dict[str, Any]:
 def route_after_supervisor(state: AgentState) -> list[Send] | str:
     if state.get("plan_error"):
         return "finalize"
+    if state["intent"] == "clarify":
+        return "clarify_gate"
     if not state["plan"]:
         return "direct_answer" if state["intent"] == "direct" else "finalize"
     if _pending(state):
@@ -206,6 +256,7 @@ def route_after_supervisor(state: AgentState) -> list[Send] | str:
                     domain=state.get("selected_domain"),
                     profile=state.get("profile", {}),
                     memories=state.get("facts", []),
+                    may_ask=not state.get("clarifications"),
                 ),
             )
             for sid in state["ready"]
@@ -231,7 +282,9 @@ async def run_step(task: StepTask, runtime: Rt) -> dict[str, Any]:
             profile=task["profile"], memories=task["memories"], session=session
         ),
         constraints=TaskConstraints(
-            timeout_s=ctx.skill_timeouts.get(step["skill"], DEFAULT_TIMEOUT_S)
+            timeout_s=ctx.skill_timeouts.get(step["skill"], DEFAULT_TIMEOUT_S),
+            # One question per turn, whoever asks it: a later step assumes instead.
+            allow_clarification=task.get("may_ask", True),
         ),
     )
     started = time.time()
@@ -243,38 +296,98 @@ async def run_step(task: StepTask, runtime: Rt) -> dict[str, Any]:
 
 
 def hitl_gate(state: AgentState) -> dict[str, Any]:
-    """Pause for a human on the first waiting step. Only interrupt() here (G22)."""
+    """Pause for a human on the first waiting step: an approval or a clarifying question.
+    Only interrupt() here (G22)."""
     step_id = _pending(state)[0]
     waiting = state["results"][step_id]
+    kind = hitl.kind_of(waiting["data"])
     decision = interrupt(
         {
             "step_id": step_id,
             "agent": waiting["agent"],
             "reason": waiting["answer"],
             **waiting["data"],
+            "kind": kind,
         }
     )
+    if kind == hitl.CLARIFY:
+        return {
+            "hitl_decision": {
+                "step_id": step_id,
+                "kind": kind,
+                "answer": hitl.answer_of(decision),
+            }
+        }
     approved = isinstance(decision, dict) and decision.get("approved") is True
     return {
-        "hitl_decision": {"step_id": step_id, "approved": approved},
+        "hitl_decision": {"step_id": step_id, "kind": kind, "approved": approved},
         "approvals": [
             {"step_id": step_id, "agent": waiting["agent"], "approved": approved}
         ],
     }
 
 
+def clarify_gate(state: AgentState) -> dict[str, Any]:
+    """The planner's own question to the user. Only interrupt() here (G22)."""
+    decision = interrupt(
+        {**state["pending_question"], "step_id": "", "agent": "supervisor"}
+    )
+    return {
+        "hitl_decision": {
+            "step_id": "",
+            "kind": hitl.CLARIFY,
+            "answer": hitl.answer_of(decision),
+        }
+    }
+
+
+async def apply_clarification(state: AgentState, runtime: Rt) -> dict[str, Any]:
+    """Guard the answer, add the exchange to the question, and plan again."""
+    asked = state["pending_question"]["question"]
+    answer, update = await guarded_answer(
+        runtime.context, state["hitl_decision"]["answer"]
+    )
+    question = state.get("standalone_question") or state["question"]
+    return {
+        **update,
+        "standalone_question": hitl.with_clarification(question, asked, answer),
+        "clarifications": [
+            {"step_id": "", "agent": "supervisor", "question": asked, "answer": answer}
+        ],
+        "pending_question": None,
+        "hitl_decision": None,
+        "intent": "",
+    }
+
+
 async def resume_dispatch(state: AgentState, runtime: Rt) -> dict[str, Any]:
-    """Send the human's decision on the agent's own A2A task; its result replaces the waiting one."""
+    """Send the human's reply on the agent's own A2A task; its result replaces the waiting one."""
     ctx, decision = runtime.context, state["hitl_decision"]
     step_id = decision["step_id"]
     waiting = TaskResult.model_validate(state["results"][step_id])
     skill = next(s["skill"] for s in state["plan"] if s["id"] == step_id)
+    update: dict[str, Any] = {}
+    if decision["kind"] == hitl.CLARIFY:
+        answer, update = await guarded_answer(ctx, decision["answer"])
+        value: dict[str, Any] = {"answer": answer}
+        update["clarifications"] = [
+            {
+                "step_id": step_id,
+                "agent": waiting.agent,
+                "question": str(waiting.data.get("question", "")),
+                "answer": answer,
+            }
+        ]
+    else:
+        value = {"approved": decision["approved"]}
     result = await ctx.registry.resume(
-        waiting,
-        {"approved": decision["approved"]},
-        timeout_s=ctx.skill_timeouts.get(skill, DEFAULT_TIMEOUT_S),
+        waiting, value, timeout_s=ctx.skill_timeouts.get(skill, DEFAULT_TIMEOUT_S)
     )
-    return {"results": {step_id: result.model_dump(mode="json")}, "hitl_decision": None}
+    return {
+        **update,
+        "results": {step_id: result.model_dump(mode="json")},
+        "hitl_decision": None,
+    }
 
 
 def finalize(state: AgentState) -> dict[str, Any]:
@@ -367,7 +480,19 @@ def _answer(
         "agents_used": list(dict.fromkeys(agents)),
         "partial": partial,
         "prompt_versions": versions,
-        "messages": [AIMessage(content=answer)],
+        # The questions asked this turn go into the conversation before the answer, so a
+        # follow-up ("and in EUR?") sees what was agreed.
+        "messages": [
+            *(
+                m
+                for c in state.get("clarifications", [])
+                for m in (
+                    AIMessage(content=c["question"]),
+                    HumanMessage(content=c["answer"] or "(no answer)"),
+                )
+            ),
+            AIMessage(content=answer),
+        ],
     }
 
 
@@ -375,10 +500,13 @@ async def direct_answer(state: AgentState, runtime: Rt) -> dict[str, Any]:
     """No lookup needed: reply from the conversation (greetings, 'what can you do', follow-ups)."""
     ctx = runtime.context
     prompt = await aget_prompt("supervisor/direct")
+    question = state["question"]
+    for c in state.get("clarifications", []):
+        question = hitl.with_clarification(question, c["question"], c["answer"])
     messages = prompt.compile(
         capabilities=render_capabilities(ctx.registry.capabilities()),
         history=memory_block(state) + history_text(state),
-        question=state["question"],
+        question=question,
     )
     try:
         reply = await tracing.generation(

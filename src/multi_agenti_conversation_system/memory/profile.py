@@ -32,8 +32,14 @@ FIXED_KEYS = (
 _KEY = re.compile(r"[^a-z0-9]+")
 
 
+def store_label(user_id: str) -> str:
+    """The user id as a store namespace label. Labels may not contain '.', so it is escaped
+    (and '%' first, so two ids can never share a label). Other ids are unchanged."""
+    return user_id.replace("%", "%25").replace(".", "%2E")
+
+
 def namespace(user_id: str) -> tuple[str, str]:
-    return ("profile", user_id)
+    return ("profile", store_label(user_id))
 
 
 def normalise_key(key: str) -> str:

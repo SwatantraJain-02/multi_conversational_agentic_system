@@ -290,6 +290,7 @@ async def _cache_write(
         or not cache_mod.cacheable(
             partial=state.get("partial", False),
             approvals=state.get("approvals", []),
+            clarifications=state.get("clarifications", []),
             intent=state.get("intent", ""),
             standalone_ok=state.get("standalone_ok", True),
             answer=state.get("answer", ""),

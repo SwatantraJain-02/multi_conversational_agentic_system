@@ -29,8 +29,9 @@ logger = logging.getLogger(__name__)
 Rt = Runtime[SupervisorContext]
 
 
-async def input_guard(state: AgentState, runtime: Rt) -> dict[str, Any]:
-    ctx = runtime.context
+async def guard_text(ctx: SupervisorContext, text: str) -> InputVerdict:
+    """The input guard's verdict on any text the user typed: a new message, or the answer
+    to a clarifying question (which arrives on a resume, past the `input_guard` node)."""
     prompt = None
     if ctx.classify_input is not None:
         try:
@@ -47,9 +48,11 @@ async def input_guard(state: AgentState, runtime: Rt) -> dict[str, Any]:
             model=settings.CHAT_MODEL,
         )
 
-    verdict: InputVerdict = await check_input(
-        state["question"], classify if ctx.classify_input else None, prompt
-    )
+    return await check_input(text, classify if ctx.classify_input else None, prompt)
+
+
+async def input_guard(state: AgentState, runtime: Rt) -> dict[str, Any]:
+    verdict = await guard_text(runtime.context, state["question"])
     update: dict[str, Any] = {
         "question": verdict.text,
         "guard_blocked": verdict.action == "block",

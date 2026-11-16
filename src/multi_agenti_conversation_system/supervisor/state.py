@@ -26,14 +26,22 @@ class PlanStep(BaseModel):
 class RouteDecision(BaseModel):
     """The planner's output (structured)."""
 
-    intent: Literal["web", "sql", "hybrid", "compare", "direct"]
+    intent: Literal["web", "sql", "hybrid", "compare", "direct", "clarify"]
     # Required (no default): a model that sees it as optional leaves it out, which is
-    # an empty plan. "direct" says so explicitly with [].
+    # an empty plan. "direct" and "clarify" say so explicitly with [].
     plan: list[PlanStep] = Field(
-        description="The steps, in order. An empty list only for intent direct"
+        description="The steps, in order. An empty list only for intent direct or clarify"
     )
     reason: str = Field(
         default="", description="At most one short sentence. Written after the plan."
+    )
+    # Only for intent "clarify". Defaults, so the other shapes are unchanged for the model.
+    question: str = Field(
+        default="", description="Intent clarify only: the one question to ask the user"
+    )
+    options: list[str] = Field(
+        default_factory=list,
+        description="Intent clarify only: 2 to 4 likely answers, short",
     )
 
 
@@ -86,14 +94,20 @@ class AgentState(TypedDict, total=False):
     intent: str
     plan: list[dict[str, Any]]  # PlanStep dicts
     plan_error: str  # why no valid plan exists ("" when there is one)
+    pending_question: dict[str, Any] | None  # the planner's question (intent clarify)
     ready: list[str]  # ids of the steps to dispatch now
     dispatched: list[str]
     dispatch_count: int
     skipped: list[str]  # steps dropped because the dispatch budget ran out
     results: Annotated[dict[str, Any], merge_dicts]  # step id -> TaskResult dict
     timings: Annotated[dict[str, Any], merge_dicts]  # step id -> [start, end] (epoch s)
-    hitl_decision: dict[str, Any] | None  # {"step_id", "approved"}
+    # The human's reply to a pause: {"step_id", "kind": "approval", "approved"} or
+    # {"step_id", "kind": "clarify", "answer"}; step_id is "" for the planner's own question.
+    hitl_decision: dict[str, Any] | None
     approvals: Annotated[list[dict[str, Any]], operator.add]  # audit: who decided what
+    # Questions asked and answered this turn: {"step_id", "agent", "question", "answer"}.
+    # Kept apart from `approvals`: an answer is never consent to personal data.
+    clarifications: Annotated[list[dict[str, Any]], operator.add]
     # --- the input guard, this turn
     guard_blocked: bool
     guard_flagged: (

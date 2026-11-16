@@ -2,6 +2,12 @@
 
     plan_queries -> search_one (xN, parallel) -> merge_dedupe -> fetch_one (xM, parallel)
         -> chunk -> rerank -> compress -> summarise            (no sources: no_results)
+      ^   \\-> clarify_gate (a question to the user) -+
+      +-------------------------------------------------+
+
+The planner may ask the user one question instead of searching (see `hitl`); clarify_gate
+interrupts with it and adds the answer to the question, and planning runs again. A second
+question is ignored: the agent searches with what it has.
 
 Budget (the Web MCP server rate-limits per process: search bursts at 5, fetch at 10):
 at most MAX_QUERIES searches and MAX_URLS page reads per task.
@@ -23,9 +29,9 @@ from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from langgraph.runtime import Runtime
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
 
-from multi_agenti_conversation_system import tracing
+from multi_agenti_conversation_system import hitl, tracing
 from multi_agenti_conversation_system.a2a.contracts import AgentError
 from multi_agenti_conversation_system.agents.web.context import WebContext
 from multi_agenti_conversation_system.agents.web.state import WebState
@@ -116,12 +122,32 @@ async def plan_queries(state: WebState, runtime: Rt) -> dict[str, Any]:
         update.update(
             queries=_clean_queries(plan.queries), recency=plan.recency, topic=plan.topic
         )
+        if plan.clarification and state.get("clarified", 0) < hitl.MAX_CLARIFICATIONS:
+            update["clarify"] = hitl.clarify_payload(plan.clarification, plan.options)
+            return update
     except Exception as exc:  # noqa: BLE001 - a plan is a bonus: the question itself is a query
         logger.warning("query planning failed (%s), searching the question as-is", exc)
         update["queries"] = []
     if not update.get("queries"):
         update["queries"] = _clean_queries([state["question"]])
     return update
+
+
+def clarify_gate(state: WebState) -> dict[str, Any]:
+    """Ask the user. Only interrupt() and pure state after it: resuming re-runs it (G22)."""
+    payload = state["clarify"]
+    answer = hitl.answer_of(interrupt(payload))
+    return {
+        "question": hitl.with_clarification(
+            state["question"], payload["question"], answer
+        ),
+        "clarify": None,
+        "clarified": state.get("clarified", 0) + 1,
+    }
+
+
+def route_after_plan(state: WebState) -> list[Send] | str:
+    return "clarify_gate" if state.get("clarify") else fan_out_search(state)
 
 
 def fan_out_search(state: WebState) -> list[Send]:

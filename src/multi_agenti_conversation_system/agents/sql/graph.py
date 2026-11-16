@@ -5,6 +5,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
+from multi_agenti_conversation_system import hitl
 from multi_agenti_conversation_system.a2a.contracts import (
     AgentError,
     TaskRequest,
@@ -35,6 +36,7 @@ def build_graph(checkpointer):
     graph.add_node("validate", nodes.validate)
     graph.add_node("approval_check", nodes.approval_check, retry_policy=RETRY)
     graph.add_node("hitl_gate", nodes.hitl_gate)
+    graph.add_node("clarify_gate", nodes.clarify_gate)
     graph.add_node("execute", nodes.execute, retry_policy=RETRY)
     graph.add_node("explain_result", nodes.explain_result)
     graph.add_node("write_sql_pair", nodes.write_sql_pair)
@@ -42,7 +44,10 @@ def build_graph(checkpointer):
 
     graph.add_edge(START, "retrieve_schema")
     graph.add_edge("retrieve_schema", "generate_sql")
-    graph.add_conditional_edges("generate_sql", nodes.after_generate, ["validate", END])
+    graph.add_conditional_edges(
+        "generate_sql", nodes.after_generate, ["validate", "clarify_gate", END]
+    )
+    graph.add_edge("clarify_gate", "generate_sql")
     graph.add_conditional_edges(
         "validate", nodes.after_validate, ["approval_check", "generate_sql", "fail_end"]
     )
@@ -80,6 +85,11 @@ def build_input(request: TaskRequest) -> dict[str, Any]:
         "error": "",
         "failed_sql": "",
         "refused": "",
+        "clarify": None,
+        # A caller that forbids questions counts as "already asked".
+        "clarified": 0
+        if request.constraints.allow_clarification
+        else hitl.MAX_CLARIFICATIONS,
         "est_rows": 0,
         "pii_columns": [],
         "requires_approval": False,

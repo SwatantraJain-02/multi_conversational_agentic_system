@@ -116,6 +116,9 @@ class FactStore:
     def __init__(self, backend: Any = vectorstore, embedder: Any = None) -> None:
         self.backend = backend
         self._embedder = embedder
+        # user_id -> ids of active facts this process wrote. A filter fetch lags behind a
+        # write (G14), so `list_active` adds these and re-reads everything by id.
+        self._recent: dict[str, set[str]] = {}
 
     @property
     def embedder(self) -> Any:
@@ -162,6 +165,7 @@ class FactStore:
             else NEVER
         )
         doc_id = fact_id(user_id, attribute, text)
+        self._recent.setdefault(user_id, set()).add(doc_id)
         existing = self.backend.fetch(NAMESPACE, ids=[doc_id]).get(doc_id)
         live = existing and existing.get("status") == "active"
 
@@ -289,18 +293,32 @@ class FactStore:
         return ranked
 
     async def list_active(self, user_id: str, now: float | None = None) -> list[Fact]:
-        """Everything known about the user ('what do you know about me?'), newest first."""
+        """Everything known about the user ('what do you know about me?'), newest first.
+
+        A filter fetch reads the search index, which lags a few seconds behind a write
+        (G14): a fact stated this turn would be missing, and a forgotten or superseded one
+        would still show. So the filter only proposes ids (plus the ones this process just
+        wrote), and the documents themselves are read by id, which is always fresh.
+        """
         now = int(time.time() if now is None else now)
 
         def run() -> list[Fact]:
-            docs = self.backend.fetch(
+            proposed = self.backend.fetch(
                 NAMESPACE,
                 filter=vectorstore.build_filter(
                     eq={"user_id": user_id, "status": "active"}, gt={"expires_at": now}
                 ),
             )
+            ids = sorted({*proposed, *self._recent.get(user_id, ())})
+            docs = self.backend.fetch(NAMESPACE, ids=ids) if ids else {}
             return sorted(
-                (_fact(i, d) for i, d in docs.items()),
+                (
+                    _fact(i, d)
+                    for i, d in docs.items()
+                    if d.get("user_id") == user_id
+                    and d.get("status") == "active"
+                    and int(d.get("expires_at", 0)) > now
+                ),
                 key=lambda f: f.created_at,
                 reverse=True,
             )

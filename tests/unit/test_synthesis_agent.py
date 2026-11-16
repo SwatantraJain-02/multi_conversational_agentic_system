@@ -7,7 +7,9 @@ delegation degrades to a partial answer instead of failing the task.
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
+from multi_agenti_conversation_system import hitl
 from multi_agenti_conversation_system.a2a.contracts import (
     AgentError,
     ContractError,
@@ -266,3 +268,78 @@ async def test_pii_rows_stay_out_of_the_trace(monkeypatch):
     graph, ctx, _ = make(FakeRegistry())
     await run(graph, ctx, request(internal=pii, external=external()))
     assert seen["compose"] == tracing.OMITTED and "Maria" not in str(seen)
+
+
+# ------------------------------------------- the Web agent's question, relayed up
+WEB_ASKS = TaskResult(
+    status="input_required",
+    agent="web",
+    answer="Which market: global or European?",
+    data=hitl.clarify_payload(
+        "Which market: global or European?", ["Global", "Europe"]
+    ),
+    a2a_task_id="web-task-1",
+    context_id="web-ctx-1",
+)
+
+
+class AskingRegistry(FakeRegistry):
+    def __init__(self, *resume_replies):
+        super().__init__(WEB_ASKS)
+        self.resume_replies, self.resumes = list(resume_replies), []
+
+    async def resume(self, waiting, value, **kw):
+        self.resumes.append((waiting, value, kw))
+        return self.resume_replies.pop(0)
+
+
+async def test_a_question_from_the_web_agent_is_relayed_up_and_the_answer_sent_back():
+    registry = AskingRegistry(external())
+    graph, ctx, model = make(registry)
+    config = {"configurable": {"thread_id": "t1"}}
+    req = request(internal=internal())
+    out = await graph.ainvoke(build_input(req), config, context=ctx)
+    payload = out["__interrupt__"][0].value
+    assert payload["kind"] == "clarify" and payload["asked_by"] == "web"
+    assert payload["question"] == "Which market: global or European?"
+    assert [k for k, _ in model.seen] == ["derive"]  # nothing composed while it waits
+
+    state = await graph.ainvoke(
+        Command(resume={"answer": "Europe"}), config, context=ctx
+    )
+    waiting, value, kw = registry.resumes[0]
+    assert (waiting.a2a_task_id, value, kw["sender"]) == (
+        "web-task-1",
+        {"answer": "Europe"},
+        "synthesis",
+    )
+    result = to_result(state, req)
+    assert result.ok and result.data["delegated"] and not result.data["partial"]
+    assert len(registry.calls) == 1  # the answer was not a second delegation
+
+
+async def test_a_failed_reply_after_the_question_is_a_gap_not_a_failure():
+    registry = AskingRegistry(
+        TaskResult.failure("web", "unavailable", "web agent restarted")
+    )
+    graph, ctx, _ = make(registry)
+    config = {"configurable": {"thread_id": "t1"}}
+    req = request(internal=internal())
+    await graph.ainvoke(build_input(req), config, context=ctx)
+    state = await graph.ainvoke(Command(resume={"answer": ""}), config, context=ctx)
+    result = to_result(state, req)
+    assert (
+        result.ok and result.data["partial"] and "web agent restarted" in result.answer
+    )
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_the_callers_rule_on_questions_is_passed_to_the_web_agent(allowed):
+    from multi_agenti_conversation_system.a2a.contracts import TaskConstraints
+
+    registry = FakeRegistry()
+    graph, ctx, _ = make(registry)
+    req = request(internal=internal())
+    req.constraints = TaskConstraints(allow_clarification=allowed)
+    await run(graph, ctx, req)
+    assert registry.calls[0][1].constraints.allow_clarification is allowed
